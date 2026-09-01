@@ -122,8 +122,13 @@ enum Readout {
     }
 
     static func barColor(for level: Float) -> CGColor {
-        let index = Int((max(0, min(1, level)) * Float(barColors.count - 1)).rounded())
-        return barColors[index]
+        barColors[colorIndex(for: level)]
+    }
+
+    /// Which step of the ramp a level lands on. Exposed so the draw loop can
+    /// notice the colour hasn't moved and skip the assignment.
+    static func colorIndex(for level: Float) -> Int {
+        Int((max(0, min(1, level)) * Float(barColors.count - 1)).rounded())
     }
 
     private static func taper(_ i: Int, of bars: Int) -> Float {
@@ -215,6 +220,10 @@ final class AnswerBarView: NSView {
     private let body = HUD.label(size: 18, weight: .medium)
     private let wave = CALayer()
     private var bars: [CALayer] = []
+    /// Last colour step written to each bar. The ramp only has twelve steps, so
+    /// most frames leave most bars alone — worth tracking across roughly a
+    /// hundred bars redrawn sixty times a second.
+    private var barColorSteps: [Int] = []
 
     private let text: String
     private var envelope: [Float] = []
@@ -328,6 +337,7 @@ final class AnswerBarView: NSView {
 
         let count = Readout.barCount(forWidth: bounds.width)
         shown = [Float](repeating: 0, count: count)
+        barColorSteps = [Int](repeating: -1, count: count)
         let span = Readout.barWidthTotal()
         let offset = (inner.width - (span * CGFloat(count) - Readout.barGap)) / 2
         let midY = Readout.waveHeight / 2
@@ -451,7 +461,11 @@ final class AnswerBarView: NSView {
             frame.origin.y = midY - half
             frame.size.height = half * 2
             bar.frame = frame
-            bar.backgroundColor = Readout.barColor(for: shown[i])
+            let step = Readout.colorIndex(for: shown[i])
+            if barColorSteps[i] != step {
+                barColorSteps[i] = step
+                bar.backgroundColor = Readout.barColors[step]
+            }
             bar.opacity = Float(0.55 + min(0.45, Double(shown[i]) * 0.9))
         }
         CATransaction.commit()

@@ -10,6 +10,25 @@ final class MonitorWindow: NSWindowController {
     private let logView = NSTextView()
     private var peakHold: Float = 0
     private var peakDecayTimer: Timer?
+    private var logLines = 0
+
+    /// Long enough to scroll back through a session, bounded so a Mac left
+    /// running for days doesn't accumulate the whole log in memory.
+    private static let maxLogLines = 500
+
+    /// One formatter for the window's life. Building one per line is most of
+    /// the cost of logging.
+    private static let stamper: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .medium
+        return formatter
+    }()
+
+    /// The engine keeps reporting levels whether or not anyone is looking, and
+    /// this controller is kept alive once opened — so every UI update here is
+    /// gated on the window actually being on screen.
+    private var isVisible: Bool { window?.isVisible ?? false }
 
     convenience init() {
         let window = NSWindow(
@@ -21,6 +40,13 @@ final class MonitorWindow: NSWindowController {
         window.center()
         self.init(window: window)
         buildUI()
+    }
+
+    /// The log keeps recording while the window is closed but doesn't scroll,
+    /// so catch up on the way back in.
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        logView.scrollToEndOfDocument(nil)
     }
 
     private func buildUI() {
@@ -87,28 +113,59 @@ final class MonitorWindow: NSWindowController {
         ])
 
         peakDecayTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self else { return }
+            guard let self, self.isVisible else { return }
             self.peakHold *= 0.86
             self.meter.floatValue = min(1, self.peakHold * 4)
         }
     }
 
     func update(level: Float, background: Float) {
+        guard isVisible else { return }
         peakHold = max(peakHold, level)
-        let threshold = max(Prefs.sensitivity.config.absoluteThreshold,
-                            background * Prefs.sensitivity.config.attackRatio)
+        // One read of the setting, not two: this runs about 24 times a second.
+        let config = Prefs.sensitivity.config
+        let threshold = max(config.absoluteThreshold, background * config.attackRatio)
         numbers.stringValue = String(
             format: "level %.4f   background %.4f   threshold %.4f",
             level, background, threshold)
     }
 
     func setTranscript(_ text: String) {
+        guard isVisible else { return }
         transcript.stringValue = text.isEmpty ? "…" : "\u{201C}\(text)\u{201D}"
     }
 
+    /// Appended through the text storage rather than `string +=`, which copied
+    /// and re-laid out the entire log for every line.
     func append(_ line: String) {
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        logView.string += "[\(stamp)] \(line)\n"
-        logView.scrollToEndOfDocument(nil)
+        let entry = "[\(Self.stamper.string(from: Date()))] \(line)\n"
+        guard let storage = logView.textStorage else {
+            logView.string += entry
+            return
+        }
+        storage.append(NSAttributedString(string: entry, attributes: [
+            .font: logView.font ?? .monospacedSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+        ]))
+        logLines += 1
+        trimLogIfNeeded(storage)
+        if isVisible { logView.scrollToEndOfDocument(nil) }
+    }
+
+    private func trimLogIfNeeded(_ storage: NSTextStorage) {
+        guard logLines > Self.maxLogLines else { return }
+        let text = storage.string as NSString
+        var cut = 0
+        var dropped = 0
+        while dropped < logLines - Self.maxLogLines {
+            let newline = text.range(of: "\n", range: NSRange(location: cut,
+                                                             length: text.length - cut))
+            guard newline.location != NSNotFound else { break }
+            cut = newline.location + 1
+            dropped += 1
+        }
+        guard cut > 0 else { return }
+        storage.deleteCharacters(in: NSRange(location: 0, length: cut))
+        logLines -= dropped
     }
 }

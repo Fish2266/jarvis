@@ -49,6 +49,8 @@ final class ListenerEngine {
     private var didFire = false
     /// Bumped on every arm and cancel so late async work can tell it's stale.
     private var runID = 0
+    /// Block-based observers aren't torn down with their owner — keep the token.
+    private var macrosObserver: NSObjectProtocol?
 
     init() {
         detector.config = Prefs.sensitivity.config
@@ -58,13 +60,18 @@ final class ListenerEngine {
         NotificationCenter.default.addObserver(
             self, selector: #selector(configurationChanged),
             name: .AVAudioEngineConfigurationChange, object: engine)
-        NotificationCenter.default.addObserver(
+        macrosObserver = NotificationCenter.default.addObserver(
             forName: .macrosChanged, object: nil, queue: .main) { [weak self] _ in
                 self?.macros = MacroStore.load()
             }
 
         EscapeHotKey.shared.onPress = { [weak self] in self?.cancel() }
         AppIndex.shared.ensureLoaded()
+    }
+
+    deinit {
+        if let macrosObserver { NotificationCenter.default.removeObserver(macrosObserver) }
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func wireDetector() {
@@ -229,6 +236,11 @@ final class ListenerEngine {
         guard SpeechListener.authorization == .authorized else {
             log("speech recognition isn't authorized — opening the first command instead")
             if let macro = macros.first(where: \.enabled) {
+                // Reset here too: `execute` refuses to fire while `didFire` is
+                // set, and the reset below is past this early return — so
+                // without this, this fallback worked exactly once per launch.
+                runID += 1
+                didFire = false
                 execute(Resolution(macro: macro, confidence: 1, source: .macro), heard: "")
             }
             return
@@ -510,8 +522,8 @@ final class ListenerEngine {
             if Prefs.showHUD { HUDOverlay.shared.setDetail(line) }
             if Prefs.speakReply { VoiceBox.shared.speak(line) }
             log("sleeping the Mac")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
-                if !SystemPower.sleepNow() { self.log("couldn't sleep the Mac") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self] in
+                if !SystemPower.sleepNow() { self?.log("couldn't sleep the Mac") }
             }
             completion(nil)
 

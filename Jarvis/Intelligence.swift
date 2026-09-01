@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import os
 
 @Generable
 private struct Target {
@@ -35,6 +36,10 @@ final class Intelligence {
     private let queue = DispatchQueue(label: "jarvis.intelligence", qos: .userInitiated)
 
     private var cachedAvailability: (value: Bool, reason: String?, checkedAt: Date)?
+    /// `isAvailable` is read from main (the menu), from the prewarm queue, and
+    /// from whatever executor the async requests land on, so the cache behind it
+    /// needs a lock — it holds a String, and a torn read there is a crash.
+    private var availabilityLock = os_unfair_lock()
 
     var isAvailable: Bool { availability().value }
     var unavailableReason: String? { availability().reason }
@@ -42,7 +47,10 @@ final class Intelligence {
     /// Cached briefly — the menu asks on every open, and this shouldn't be a
     /// framework round trip each time.
     private func availability() -> (value: Bool, reason: String?) {
-        if let cached = cachedAvailability, Date().timeIntervalSince(cached.checkedAt) < 60 {
+        os_unfair_lock_lock(&availabilityLock)
+        let cached = cachedAvailability
+        os_unfair_lock_unlock(&availabilityLock)
+        if let cached, Date().timeIntervalSince(cached.checkedAt) < 60 {
             return (cached.value, cached.reason)
         }
         let result: (Bool, String?)
@@ -61,7 +69,9 @@ final class Intelligence {
                 result = (false, "Apple Intelligence is unavailable")
             }
         }
+        os_unfair_lock_lock(&availabilityLock)
         cachedAvailability = (result.0, result.1, Date())
+        os_unfair_lock_unlock(&availabilityLock)
         return result
     }
 

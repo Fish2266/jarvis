@@ -602,8 +602,8 @@ final class HUDView: NSView {
             scale.isRemovedOnCompletion = false
             self.reticle.add(scale, forKey: "out")
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
-                self.onFinished?()
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                self?.onFinished?()
             }
         }
         dismissWork = work

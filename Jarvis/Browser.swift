@@ -111,7 +111,10 @@ enum Browser {
     /// path has to start with it.
     static func tabMatches(_ tabURL: String, target: String) -> Bool {
         func host(_ url: URL) -> String? {
-            url.host?.lowercased().replacingOccurrences(of: "www.", with: "")
+            guard let host = url.host?.lowercased() else { return nil }
+            // Only a leading "www.", the way matchPrefixes does it — stripping
+            // it anywhere would fold "news.www.example.com" onto the wrong host.
+            return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
         }
         guard let wanted = URL(string: target), let open = URL(string: tabURL),
               let wantedHost = host(wanted), let openHost = host(open),
@@ -120,7 +123,10 @@ enum Browser {
 
         let wantedPath = wanted.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         if wantedPath.isEmpty { return true }
-        return open.path.hasPrefix(wanted.path)
+        // Compare against the same trimmed path the emptiness test used, so a
+        // target written with a trailing slash still matches the tab without one.
+        return open.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .hasPrefix(wantedPath)
     }
 
     private static func runScript(_ source: String) -> String? {

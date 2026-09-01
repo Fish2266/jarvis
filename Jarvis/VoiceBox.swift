@@ -17,6 +17,10 @@ final class VoiceBox {
     private let eq = AVAudioUnitEQ(numberOfBands: 3)
     private let reverb = AVAudioUnitReverb()
     private var wiredFormat: AVAudioFormat?
+    /// Whether the nodes are on the engine. Separate from `wiredFormat`, which
+    /// only says what they were last connected at: `resetChain` clears the
+    /// format to force a re-connect, and must not re-attach along with it.
+    private var nodesAttached = false
 
     private init() {}
 
@@ -54,21 +58,27 @@ final class VoiceBox {
                               enhanced: [AVSpeechSynthesisVoice],
                               english: [AVSpeechSynthesisVoice],
                               other: [AVSpeechSynthesisVoice]) {
-        let all = AVSpeechSynthesisVoice.speechVoices().filter { !isNovelty($0) }
-        let byRank = { (a: AVSpeechSynthesisVoice, b: AVSpeechSynthesisVoice) in rank(a) > rank(b) }
-        let premium = all.filter { $0.quality == .premium }.sorted(by: byRank)
-        let enhanced = all.filter { $0.quality == .enhanced }.sorted(by: byRank)
-        let rest = all.filter { $0.quality == .default }
-        return (premium, enhanced,
-                rest.filter { $0.language.hasPrefix("en") }.sorted(by: byRank),
-                rest.filter { !$0.language.hasPrefix("en") }
-                    .sorted { $0.language < $1.language })
+        let all = AVSpeechSynthesisVoice.speechVoices()
+            .filter { !isNovelty($0) }
+            .map { (voice: $0, rank: rank($0)) }
+        // Ranked once each rather than twice per comparison inside the sort.
+        let byRank = { (a: (voice: AVSpeechSynthesisVoice, rank: Int),
+                        b: (voice: AVSpeechSynthesisVoice, rank: Int)) in a.rank > b.rank }
+        let premium = all.filter { $0.voice.quality == .premium }.sorted(by: byRank)
+        let enhanced = all.filter { $0.voice.quality == .enhanced }.sorted(by: byRank)
+        let rest = all.filter { $0.voice.quality == .default }
+        return (premium.map(\.voice), enhanced.map(\.voice),
+                rest.filter { $0.voice.language.hasPrefix("en") }.sorted(by: byRank).map(\.voice),
+                rest.filter { !$0.voice.language.hasPrefix("en") }
+                    .sorted { $0.voice.language < $1.voice.language }.map(\.voice))
     }
 
     static func englishVoices() -> [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.hasPrefix("en") }
-            .sorted { rank($0) > rank($1) }
+            .map { (voice: $0, rank: rank($0)) }
+            .sorted { $0.rank > $1.rank }
+            .map(\.voice)
     }
 
     /// Your pick if it's still installed, otherwise the best thing available.
@@ -127,10 +137,11 @@ final class VoiceBox {
         if wiredFormat == format { return true }
 
         if engine.isRunning { engine.stop() }
-        if wiredFormat == nil {
+        if !nodesAttached {
             engine.attach(player)
             engine.attach(eq)
             engine.attach(reverb)
+            nodesAttached = true
         }
 
         Self.configure(eq: eq, reverb: reverb)

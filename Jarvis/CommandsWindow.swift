@@ -312,8 +312,9 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
         editingIndex = index
 
         guard let index else {
-            [nameField, kindPopup, profilePopup, chooseButton, enabledCheck, testButton]
-                .forEach { ($0 as? NSControl)?.isEnabled = false }
+            let controls: [NSControl] = [nameField, kindPopup, profilePopup,
+                                         chooseButton, enabledCheck, testButton]
+            controls.forEach { $0.isEnabled = false }
             phrasesView.isEditable = false
             targetView.isEditable = false
             nameField.stringValue = ""
@@ -321,8 +322,8 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
             targetView.string = ""
             return
         }
-        [nameField, kindPopup, enabledCheck, testButton]
-            .forEach { ($0 as? NSControl)?.isEnabled = true }
+        let controls: [NSControl] = [nameField, kindPopup, enabledCheck, testButton]
+        controls.forEach { $0.isEnabled = true }
         phrasesView.isEditable = true
 
         let macro = macros[index]

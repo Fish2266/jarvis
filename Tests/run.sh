@@ -65,3 +65,11 @@ swiftc -O $T -o "$OUT/sleep" \
     Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
     Tests/sleep/main.swift
 "$OUT/sleep"
+
+echo
+echo "===== audit regressions ====="
+swiftc -O $T -o "$OUT/audit" \
+    Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
+    Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
+    Tests/audit/main.swift
+"$OUT/audit"

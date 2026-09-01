@@ -6,37 +6,47 @@ import Foundation
 enum PhraseMatcher {
 
     static func normalize(_ s: String) -> String {
-        var out = ""
-        out.reserveCapacity(s.count)
         // Spaces are held back rather than written, which collapses runs and
         // trims both ends in the same pass the characters are copied in.
-        var pendingSpace = false
 
-        func emit(_ ch: Character) {
-            if ch.isLetter || ch.isNumber {
-                if pendingSpace { out.append(" "); pendingSpace = false }
-                out.append(ch)
-            } else if ch == "'" || ch == "\u{2019}" {
-                return                        // don't let apostrophes split words
-            } else if !out.isEmpty {
-                pendingSpace = true
-            }
-        }
-
-        // Nothing in ASCII carries a diacritic, so the fold is a no-op there —
-        // and skipping it matters: this runs against every phrase of every
-        // command on every partial transcript, and the fold was most of its cost.
+        // Nothing in ASCII carries a diacritic, so the fold is a no-op there,
+        // and letter-or-number is exactly [a-z0-9] once the byte is lowered.
+        // Worth the separate path: this runs against every phrase of every
+        // command on every partial transcript, and going byte-wise skips both
+        // the fold and the grapheme-cluster work of building Characters.
         if s.utf8.allSatisfy({ $0 < 0x80 }) {
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(s.utf8.count)
+            var pendingSpace = false
             for byte in s.utf8 {
-                let lowered = (byte >= 65 && byte <= 90) ? byte + 32 : byte
-                emit(Character(UnicodeScalar(lowered)))
+                let c = (byte >= 65 && byte <= 90) ? byte + 32 : byte
+                if (c >= 97 && c <= 122) || (c >= 48 && c <= 57) {
+                    if pendingSpace { bytes.append(32); pendingSpace = false }
+                    bytes.append(c)
+                } else if c == 0x27 {
+                    continue              // don't let apostrophes split words
+                } else if !bytes.isEmpty {
+                    pendingSpace = true
+                }
             }
-            return out
+            return String(decoding: bytes, as: UTF8.self)
         }
 
         let folded = s.lowercased().folding(options: [.diacriticInsensitive],
                                             locale: Locale(identifier: "en_US"))
-        for ch in folded { emit(ch) }
+        var out = ""
+        out.reserveCapacity(folded.count)
+        var pendingSpace = false
+        for ch in folded {
+            if ch.isLetter || ch.isNumber {
+                if pendingSpace { out.append(" "); pendingSpace = false }
+                out.append(ch)
+            } else if ch == "'" || ch == "\u{2019}" {
+                continue
+            } else if !out.isEmpty {
+                pendingSpace = true
+            }
+        }
         return out
     }
 

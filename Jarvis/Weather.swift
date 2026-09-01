@@ -50,7 +50,7 @@ final class Weather: NSObject, CLLocationManagerDelegate {
         }
 
         switch manager.authorizationStatus {
-        case .authorized, .authorizedAlways:
+        case .authorizedAlways, .authorizedWhenInUse:
             if let loc = manager.location {
                 fetch(latitude: loc.coordinate.latitude, longitude: loc.coordinate.longitude)
             } else {
@@ -80,7 +80,7 @@ final class Weather: NSObject, CLLocationManagerDelegate {
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         guard fetching else { return }
         switch manager.authorizationStatus {
-        case .authorized, .authorizedAlways: manager.requestLocation()
+        case .authorizedAlways, .authorizedWhenInUse: manager.requestLocation()
         case .notDetermined: break
         default: finish(.failure(WeatherError.noLocation))
         }

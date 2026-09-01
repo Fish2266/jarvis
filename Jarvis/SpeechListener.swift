@@ -21,7 +21,23 @@ final class SpeechListener {
     private var lock = os_unfair_lock()
 
     private(set) var isListening = false
-    private var latestTranscript = ""
+
+    /// The recogniser delivers results on its own queue while the timeout and
+    /// the finish path read this from main, so it goes through the same lock
+    /// rather than being torn between the two.
+    private var _latestTranscript = ""
+    private var latestTranscript: String {
+        get {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            return _latestTranscript
+        }
+        set {
+            os_unfair_lock_lock(&lock)
+            _latestTranscript = newValue
+            os_unfair_lock_unlock(&lock)
+        }
+    }
 
     var onPartial: ((String) -> Void)?
     var onEnd: ((String?) -> Void)?     // nil transcript = failed / nothing heard
@@ -72,21 +88,21 @@ final class SpeechListener {
         task = recognizer.recognitionTask(with: req) { [weak self] result, error in
             guard let self else { return }
             if let result {
-                self.latestTranscript = result.bestTranscription.formattedString
-                let latest = self.latestTranscript
+                let latest = result.bestTranscription.formattedString
+                self.latestTranscript = latest
                 DispatchQueue.main.async { self.onPartial?(latest) }
             }
             if error != nil || (result?.isFinal ?? false) {
                 DispatchQueue.main.async {
                     guard self.isListening else { return }
-                    self.finish(with: self.latestTranscript.isEmpty ? nil : self.latestTranscript)
+                    self.finishWithLatest()
                 }
             }
         }
 
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isListening else { return }
-            self.finish(with: self.latestTranscript.isEmpty ? nil : self.latestTranscript)
+            self.finishWithLatest()
         }
         timeoutWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: work)
@@ -99,7 +115,7 @@ final class SpeechListener {
         existing.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isListening else { return }
-            self.finish(with: self.latestTranscript.isEmpty ? nil : self.latestTranscript)
+            self.finishWithLatest()
         }
         timeoutWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
@@ -110,6 +126,13 @@ final class SpeechListener {
         let target = request
         os_unfair_lock_unlock(&lock)
         target?.append(buffer)
+    }
+
+    /// One read of the transcript behind the lock, so the emptiness test and
+    /// the value delivered can't come from two different moments.
+    private func finishWithLatest() {
+        let text = latestTranscript
+        finish(with: text.isEmpty ? nil : text)
     }
 
     /// Called from the recognizer/timeout path — tears down and reports.
