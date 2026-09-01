@@ -1,0 +1,22 @@
+# Build output — xcodebuild writes its derived data here (hundreds of MB).
+build/
+DerivedData/
+*.xcarchive
+
+# Xcode per-user state, not part of the project.
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.moved-aside
+.swiftpm/
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
