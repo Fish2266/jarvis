@@ -72,22 +72,47 @@ enum Browser {
             .map(\.email)
     }
 
+    /// The argv Chrome is launched with to land in a particular profile.
+    ///
+    /// Split out so a test can hold it to the one thing that matters: the
+    /// profile stays a single argument even when its directory name contains a
+    /// space, which "Profile 1" — the second profile Chrome ever makes — does.
+    static func chromeArguments(profile: String, url: String?) -> [String] {
+        var arguments = ["--profile-directory=\(profile)"]
+        // No URL means "just give me a window in that profile".
+        if let url, !url.isEmpty { arguments.append(url) }
+        return arguments
+    }
+
+    /// The executable inside an app bundle, per its own Info.plist.
+    static func executable(inside bundle: URL) -> URL? {
+        guard let name = Bundle(url: bundle)?.infoDictionary?["CFBundleExecutable"] as? String,
+              !name.isEmpty
+        else { return nil }
+        return bundle.appendingPathComponent("Contents/MacOS/\(name)")
+    }
+
     /// Opens a URL, optionally forcing a specific Chrome profile.
     ///
-    /// Goes through `/usr/bin/open -n` rather than NSWorkspace: launch arguments
-    /// are only delivered to a *new* instance, and Chrome routes that new instance's
-    /// request into the requested profile before exiting. Without `-n` a running
-    /// Chrome just gets activated and the profile flag is dropped.
+    /// Runs Chrome's own binary rather than `/usr/bin/open -n -a … --args …`.
+    /// What follows `--args` is re-split on whitespace somewhere between `open`
+    /// and the app, so a profile directory with a space arrived as
+    /// `--profile-directory=Profile`, no such profile existed, and Chrome
+    /// quietly opened Default instead — "open chrome on personal" looked like
+    /// it worked and gave you the wrong account. An argv array passed straight
+    /// to the binary keeps the argument whole.
+    ///
+    /// It is still a *new* instance, which is the part that always mattered:
+    /// launch arguments only reach a new one, and it routes the request into
+    /// the requested profile before exiting. A running Chrome asked merely to
+    /// activate comes forward with the profile flag dropped.
     @discardableResult
     static func open(_ urlString: String?, chromeProfile: String?) -> Bool {
-        if let profile = chromeProfile, !profile.isEmpty, let chrome = chromeURL() {
-            var arguments = ["-n", "-a", chrome.path, "--args", "--profile-directory=\(profile)"]
-            // No URL means "just give me a window in that profile".
-            if let urlString, !urlString.isEmpty { arguments.append(urlString) }
-
+        if let profile = chromeProfile, !profile.isEmpty, let chrome = chromeURL(),
+           let binary = executable(inside: chrome) {
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            process.arguments = arguments
+            process.executableURL = binary
+            process.arguments = chromeArguments(profile: profile, url: urlString)
             if (try? process.run()) != nil { return true }
         }
 

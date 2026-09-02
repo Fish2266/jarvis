@@ -130,5 +130,41 @@ check("a title containing a tab keeps its first field",
 check("malformed lines are dropped", Browser.parseTabs("garbage\nx\ty\n").isEmpty)
 check("an empty reply parses to nothing", Browser.parseTabs("").isEmpty)
 
+print("\n=== launching into a profile whose directory has a space ===")
+// The bug: the profile went through `open -n -a Chrome --args
+// --profile-directory=Profile 1`, and what follows --args is re-split on
+// whitespace, so Chrome got "--profile-directory=Profile", found no such
+// profile and silently opened Default. "Default" has no space, which is why
+// work kept working and personal did not.
+let spaced = Browser.chromeArguments(profile: "Profile 1", url: nil)
+check("the profile stays ONE argument",
+      spaced == ["--profile-directory=Profile 1"], spaced.joined(separator: " | "))
+check("nothing is split at the space",
+      !spaced.contains("1") && !spaced.contains("--profile-directory=Profile"),
+      spaced.joined(separator: " | "))
+check("no open(1) wrapper is involved any more",
+      !spaced.contains("-n") && !spaced.contains("-a") && !spaced.contains("--args"),
+      spaced.joined(separator: " | "))
+
+let withURL = Browser.chromeArguments(profile: "Profile 1", url: "https://mail.google.com")
+check("a URL rides along as its own argument",
+      withURL == ["--profile-directory=Profile 1", "https://mail.google.com"],
+      withURL.joined(separator: " | "))
+check("an empty URL adds nothing",
+      Browser.chromeArguments(profile: "Default", url: "") == ["--profile-directory=Default"])
+check("a profile without a space is unaffected",
+      Browser.chromeArguments(profile: "Default", url: nil) == ["--profile-directory=Default"])
+
+if let chrome = Browser.chromeURL() {
+    let binary = Browser.executable(inside: chrome)
+    check("Chrome's own binary is found inside the bundle",
+          binary != nil && FileManager.default.isExecutableFile(atPath: binary!.path),
+          binary?.path ?? "nil")
+} else {
+    print("SKIP  Chrome's own binary is found inside the bundle (Chrome not installed)")
+}
+check("a bundle that isn't there yields nothing",
+      Browser.executable(inside: URL(fileURLWithPath: "/Applications/NotReal.app")) == nil)
+
 print("\n\(failures == 0 ? "ALL BROWSER TESTS PASSED" : "\(failures) FAILURE(S)")")
 exit(failures == 0 ? 0 : 1)
