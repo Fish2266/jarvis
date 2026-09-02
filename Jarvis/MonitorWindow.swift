@@ -2,7 +2,11 @@ import AppKit
 
 /// Live view of what the detector is hearing. Useful for picking a sensitivity:
 /// clap and watch whether the peak clears the threshold line.
-final class MonitorWindow: NSWindowController {
+final class MonitorWindow: NSWindowController, NSWindowDelegate {
+
+    /// Fires as the window appears and disappears, so the engine can stop
+    /// reporting levels to a window that isn't there.
+    var onVisibilityChange: ((Bool) -> Void)?
 
     private let meter = NSLevelIndicator()
     private let numbers = NSTextField(labelWithString: "")
@@ -39,13 +43,34 @@ final class MonitorWindow: NSWindowController {
         window.isReleasedWhenClosed = false
         window.center()
         self.init(window: window)
+        window.delegate = self
         buildUI()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onVisibilityChange?(false)
+        // The meter used to keep ticking twenty times a second for the rest of
+        // the session, drawing into a window nobody could see.
+        peakDecayTimer?.invalidate()
+        peakDecayTimer = nil
+    }
+
+    private func startMeter() {
+        guard peakDecayTimer == nil else { return }
+        peakDecayTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) {
+            [weak self] _ in
+            guard let self, self.isVisible else { return }
+            self.peakHold *= 0.86
+            self.meter.floatValue = min(1, self.peakHold * 4)
+        }
     }
 
     /// The log keeps recording while the window is closed but doesn't scroll,
     /// so catch up on the way back in.
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
+        onVisibilityChange?(true)
+        startMeter()
         logView.scrollToEndOfDocument(nil)
     }
 
@@ -112,11 +137,7 @@ final class MonitorWindow: NSWindowController {
             hint.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
         ])
 
-        peakDecayTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self, self.isVisible else { return }
-            self.peakHold *= 0.86
-            self.meter.floatValue = min(1, self.peakHold * 4)
-        }
+        // The meter starts with the window, not with the controller.
     }
 
     func update(level: Float, background: Float) {

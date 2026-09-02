@@ -31,6 +31,14 @@ final class ListenerEngine {
 
     var onState: ((ListenerState) -> Void)?
     var onLevel: ((Float, Float) -> Void)?
+    /// Set only while the Clap Monitor is on screen.
+    ///
+    /// The detector reports a level about twenty-four times a second, forever,
+    /// and each report used to hop to the main queue whether or not anything
+    /// was drawing it. That is a main-thread wake-up twice a second per idle
+    /// hour on a laptop that is otherwise doing nothing — cheap in CPU, not
+    /// free in battery, and this app is meant to run all day.
+    var wantsLevels = false
     var onLog: ((String) -> Void)?
     var onTranscript: ((String) -> Void)?
 
@@ -76,7 +84,11 @@ final class ListenerEngine {
 
     private func wireDetector() {
         detector.onLevel = { [weak self] rms, bg in
-            DispatchQueue.main.async { self?.onLevel?(rms, bg) }
+            // Read from the audio thread, written from main. A Bool is a single
+            // byte and cannot tear; the worst case is one stale frame, which
+            // costs a meter update nobody was looking at.
+            guard let self, self.wantsLevels else { return }
+            DispatchQueue.main.async { self.onLevel?(rms, bg) }
         }
         detector.onClap = { [weak self] index in
             DispatchQueue.main.async {
@@ -264,6 +276,9 @@ final class ListenerEngine {
         // loading the model means tier 2 is warm if tier 1 misses.
         if Prefs.useModel { Intelligence.shared.prewarm() }
         Weather.shared.requestAuthorizationIfNeeded()
+        // Anything installed since launch becomes reachable by name. Off the
+        // main thread, and at most once every few minutes.
+        AppIndex.shared.refreshIfStale(after: AppIndex.staleAfter)
     }
 
     /// Words worth biasing the recogniser toward: the assistant's name and
@@ -457,7 +472,7 @@ final class ListenerEngine {
         perform(macro, payload: resolution.payload,
                 forceNewTab: resolution.forceNewTab,
                 bringHere: resolution.bringHere,
-                browserFresh: fresh) { [weak self] extra in
+                browserFresh: fresh, id: id) { [weak self] extra in
             guard let self, id == self.runID else { return }
             guard !macro.kind.handlesOwnReply else { return }
             self.speakReply(action: label, heard: heard, extra: extra, id: id)
@@ -472,7 +487,7 @@ final class ListenerEngine {
     /// `completion` carries any result worth mentioning in the spoken line.
     private func perform(_ macro: Macro, payload: String?, forceNewTab: Bool = false,
                          bringHere: Bool = false,
-                         browserFresh: Browser.Fresh? = nil,
+                         browserFresh: Browser.Fresh? = nil, id: Int = 0,
                          completion: @escaping (String?) -> Void) {
         switch macro.kind {
         case .app:
@@ -504,7 +519,7 @@ final class ListenerEngine {
                     } else {
                         // Automation refused, or Chrome didn't answer in time.
                         self.log("couldn't make a new \(browserFresh.rawValue) — opening Chrome instead")
-                        self.openApp(macro, completion: completion)
+                        self.openApp(macro, id: id, completion: completion)
                     }
                 }
                 return
@@ -524,7 +539,7 @@ final class ListenerEngine {
                 }
                 return
             }
-            openApp(macro, completion: completion)
+            openApp(macro, id: id, completion: completion)
 
         case .url:
             // Same reasoning as an app, one step earlier: bring the browser to
@@ -561,7 +576,9 @@ final class ListenerEngine {
             ) { [weak self] focused in
                 guard focused else { openFresh(); return }
                 self?.log("switched to the open \(macro.name) tab")
-                if Prefs.showHUD { HUDOverlay.shared.setHeadline("Switching to \(macro.name)") }
+                self?.ifCurrent(id) {
+                    if Prefs.showHUD { HUDOverlay.shared.setHeadline("Switching to \(macro.name)") }
+                }
                 completion(nil)
             }
 
@@ -571,13 +588,17 @@ final class ListenerEngine {
                 switch result {
                 case .success(let summary):
                     self?.log("reminder added: \(summary)")
-                    if Prefs.showHUD { HUDOverlay.shared.setHeadline(summary) }
+                    self?.ifCurrent(id) {
+                        if Prefs.showHUD { HUDOverlay.shared.setHeadline(summary) }
+                    }
                     completion("Added a reminder: \(summary)")
                 case .failure(let error):
                     self?.log("reminder failed: \(error.localizedDescription)")
-                    if Prefs.showHUD {
-                        HUDOverlay.shared.setHeadline("Couldn't add that reminder")
-                        HUDOverlay.shared.setDetail(error.localizedDescription)
+                    self?.ifCurrent(id) {
+                        if Prefs.showHUD {
+                            HUDOverlay.shared.setHeadline("Couldn't add that reminder")
+                            HUDOverlay.shared.setDetail(error.localizedDescription)
+                        }
                     }
                     completion(nil)
                 }
@@ -599,13 +620,17 @@ final class ListenerEngine {
                 switch result {
                 case .success(let summary):
                     self?.log("weather: \(summary)")
-                    if Prefs.showHUD { HUDOverlay.shared.setHeadline(summary) }
+                    self?.ifCurrent(id) {
+                        if Prefs.showHUD { HUDOverlay.shared.setHeadline(summary) }
+                    }
                     completion(summary)
                 case .failure(let error):
                     self?.log("weather failed: \(error.localizedDescription)")
-                    if Prefs.showHUD {
-                        HUDOverlay.shared.setHeadline("Weather unavailable")
-                        HUDOverlay.shared.setDetail(error.localizedDescription)
+                    self?.ifCurrent(id) {
+                        if Prefs.showHUD {
+                            HUDOverlay.shared.setHeadline("Weather unavailable")
+                            HUDOverlay.shared.setDetail(error.localizedDescription)
+                        }
                     }
                     completion(nil)
                 }
@@ -613,8 +638,18 @@ final class ListenerEngine {
         }
     }
 
+    /// Runs `body` only if the command that started this is still the current
+    /// one. A weather lookup or a reminder can land seconds after you have
+    /// already asked for something else, and it used to repaint that newer
+    /// command's HUD with its own result.
+    private func ifCurrent(_ id: Int, _ body: () -> Void) {
+        guard id == runID else { return }
+        body()
+    }
+
     /// Plain "open this": activates it if it's running, launches it if not.
-    private func openApp(_ macro: Macro, completion: @escaping (String?) -> Void) {
+    private func openApp(_ macro: Macro, id: Int = 0,
+                         completion: @escaping (String?) -> Void) {
         let url = URL(fileURLWithPath: macro.target)
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
@@ -622,7 +657,9 @@ final class ListenerEngine {
             DispatchQueue.main.async {
                 if let error {
                     self?.log("couldn't open \(macro.name): \(error.localizedDescription)")
-                    if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open \(macro.name)") }
+                    self?.ifCurrent(id) {
+                        if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open \(macro.name)") }
+                    }
                 }
                 completion(nil)
             }

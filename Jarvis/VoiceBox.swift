@@ -17,6 +17,13 @@ final class VoiceBox {
     private let eq = AVAudioUnitEQ(numberOfBands: 3)
     private let reverb = AVAudioUnitReverb()
     private var wiredFormat: AVAudioFormat?
+    /// Bumped whenever speech is started or stopped.
+    ///
+    /// A line is synthesised before it is played, and `stop` could only silence
+    /// what was already playing — so pressing Escape while the reply was still
+    /// being written would silence nothing, and the line arrived a moment later
+    /// anyway. The render checks this before it reaches the speaker.
+    private var speakID = 0
     /// Whether the nodes are on the engine. Separate from `wiredFormat`, which
     /// only says what they were last connected at: `resetChain` clears the
     /// format to force a re-connect, and must not re-attach along with it.
@@ -104,6 +111,7 @@ final class VoiceBox {
     }
 
     func stop() {
+        speakID &+= 1
         synth.stopSpeaking(at: .immediate)
         if player.isPlaying { player.stop() }
     }
@@ -271,6 +279,8 @@ final class VoiceBox {
     }
 
     private func speakWithEffects(_ text: String) {
+        speakID &+= 1
+        let id = speakID
         let utterance = makeUtterance(text)
         var pieces: [AVAudioPCMBuffer] = []
         // AVSpeechSynthesizer.write delivers its zero-length end marker TWICE.
@@ -285,6 +295,7 @@ final class VoiceBox {
                 if finished { return }
                 finished = true
                 DispatchQueue.main.async {
+                    guard id == self.speakID else { return }   // stopped meanwhile
                     guard let joined = Self.join(pieces),
                           let format = self.renderFormat(),
                           let ready = Self.resample(joined, to: format)

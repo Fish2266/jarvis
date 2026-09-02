@@ -17,7 +17,11 @@ final class HUDOverlay {
 
     /// Claps heard — bring up the reticle and start the countdown.
     func beginListening(seconds: TimeInterval) {
-        guard !isShowing else { return }
+        // No `guard !isShowing`: the previous HUD can still be fading out when
+        // the next double clap lands — press Escape and clap again straight
+        // away — and bailing there left that phrase with no reticle at all.
+        // `present` tears down whatever is on screen first, so this is safe to
+        // call unconditionally.
         present()
         views.forEach { $0.run(.listening(seconds: seconds)) }
     }

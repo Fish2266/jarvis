@@ -156,6 +156,12 @@ enum Browser {
     /// window, which is what happened every time before.
     static func openProfileWindow(_ profile: String, reuseExisting: Bool,
                                   completion: @escaping (Bool) -> Void) {
+        // Read before leaving the caller's thread. `chromeProfiles` memoises
+        // into a static, and every other reader of that cache is on main —
+        // reaching for it from the script queue would be a plain data race on
+        // an array of Strings.
+        let account = profileEmail(for: profile)
+
         scriptQueue.async {
             if reuseExisting {
                 if let known = profileWindows[profile] {
@@ -165,8 +171,7 @@ enum Browser {
                     }
                     profileWindows[profile] = nil   // that window is gone
                 }
-                if let email = profileEmail(for: profile),
-                   let found = window(showing: email), focusWindow(found) {
+                if let account, let found = window(showing: account), focusWindow(found) {
                     profileWindows[profile] = found
                     DispatchQueue.main.async { completion(true) }
                     return
@@ -179,17 +184,27 @@ enum Browser {
                 return
             }
             DispatchQueue.main.async { completion(true) }
+            noteNewWindow(for: profile, notIn: before)
+        }
+    }
 
-            // Note which window Chrome put up, so asking again focuses this one
-            // rather than opening another. Runs after the caller has been told
-            // the command succeeded, so the spoken reply doesn't wait on it.
-            for _ in 0..<16 {
-                Thread.sleep(forTimeInterval: 0.25)
-                if let fresh = windowIDs().subtracting(before).first {
-                    profileWindows[profile] = fresh
-                    return
-                }
+    /// Watches for the window Chrome is about to put up and remembers it, so
+    /// asking for this profile again focuses that window instead of opening
+    /// another.
+    ///
+    /// Rescheduled rather than slept through. Sleeping held `scriptQueue` — the
+    /// one serial queue every Chrome script goes through — for as long as it
+    /// took the window to appear, so the next command sat behind it doing
+    /// nothing. This way each check is a brief visit and other work interleaves.
+    private static func noteNewWindow(for profile: String, notIn before: Set<Int>,
+                                      attempt: Int = 0) {
+        guard attempt < 8 else { return }
+        scriptQueue.asyncAfter(deadline: .now() + 0.25) {
+            if let fresh = windowIDs().subtracting(before).first {
+                profileWindows[profile] = fresh
+                return
             }
+            noteNewWindow(for: profile, notIn: before, attempt: attempt + 1)
         }
     }
 

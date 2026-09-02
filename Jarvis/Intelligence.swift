@@ -348,19 +348,49 @@ final class Intelligence {
 
     // MARK: - Timeout
 
+    /// Resumes a continuation exactly once. The operation and the timer race to
+    /// be first, and resuming twice is a crash rather than a wrong answer.
+    private final class Gate<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resumed = false
+
+        func finish(_ continuation: CheckedContinuation<T?, Never>, with value: T?) {
+            lock.lock()
+            let first = !resumed
+            resumed = true
+            lock.unlock()
+            if first { continuation.resume(returning: value) }
+        }
+    }
+
+    /// Runs `operation`, giving up on it after `seconds`.
+    ///
+    /// The straggler is cancelled and then abandoned rather than waited on. A
+    /// task group reads better and was what this used to be, but a group awaits
+    /// every child before it returns — so an operation slow to notice
+    /// cancellation held the caller well past the deadline, and the timeouts
+    /// were advisory rather than real. Measured at three seconds against a
+    /// half-second limit.
+    ///
+    /// Abandoning it is safe here because a late answer has nowhere to go: the
+    /// caller has already fallen back, and every call site checks `runID`
+    /// before touching anything.
     private static func withTimeout<T: Sendable>(
         _ seconds: TimeInterval,
         _ operation: @escaping () async throws -> T
     ) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { try? await operation() }
-            group.addTask {
+        let gate = Gate<T>()
+        return await withCheckedContinuation { continuation in
+            // Detached on purpose. A plain Task inherits the caller's actor, so
+            // called from the main actor the operation and the timer would land
+            // on the same thread — and an operation slow to yield would starve
+            // the very timer meant to cut it off.
+            let work = Task.detached { gate.finish(continuation, with: try? await operation()) }
+            Task.detached {
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
+                work.cancel()
+                gate.finish(continuation, with: nil)
             }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
         }
     }
 }

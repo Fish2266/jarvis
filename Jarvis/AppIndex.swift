@@ -13,7 +13,8 @@ final class AppIndex {
     }
 
     private(set) var entries: [Entry] = []
-    private var loaded = false
+    private var scanning = false
+    private var lastScan = Date.distantPast
 
     private init() {}
 
@@ -64,22 +65,34 @@ final class AppIndex {
         }
 
         let list = found.values.sorted { $0.name < $1.name }
-        if Thread.isMainThread {
-            entries = list
-            loaded = true
-        } else {
-            DispatchQueue.main.async {
-                self.entries = list
-                self.loaded = true
-            }
+        let publish = {
+            self.entries = list
+            self.lastScan = Date()
+            self.scanning = false
         }
+        if Thread.isMainThread { publish() } else { DispatchQueue.main.async(execute: publish) }
         return list
     }
 
-    func ensureLoaded() {
-        guard !loaded else { return }
+    /// Scans in the background unless one has finished recently.
+    ///
+    /// `scanning` is raised before leaving the main thread on purpose. It used
+    /// to be a "loaded" flag set only once the scan had finished and hopped
+    /// back to main, so two calls close together both saw an empty index and
+    /// walked every directory twice.
+    func refreshIfStale(after interval: TimeInterval) {
+        guard !scanning, Date().timeIntervalSince(lastScan) > interval else { return }
+        scanning = true
         DispatchQueue.global(qos: .utility).async { self.refresh() }
     }
+
+    /// The first scan, at launch.
+    func ensureLoaded() { refreshIfStale(after: 0) }
+
+    /// How long an index can go without a re-scan. Installing an app should
+    /// not mean restarting Jarvis before "open <it>" can find it, and the walk
+    /// costs a few milliseconds off the main thread.
+    static let staleAfter: TimeInterval = 300
 
     /// Best app whose name matches `target`, above `threshold`.
     func best(matching target: String, threshold: Double) -> (Entry, Double)? {

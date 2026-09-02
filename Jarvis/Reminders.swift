@@ -164,28 +164,37 @@ enum Reminders {
         ensureAccess { granted in
             guard granted else { completion(.failure(RemindersError.denied)); return }
 
-            let (title, due) = parse(text)
-            guard !title.isEmpty else { completion(.failure(RemindersError.emptyTitle)); return }
-            guard let calendar = list(named: listName) else {
-                completion(.failure(RemindersError.noList)); return
-            }
+            // Reading the calendar list and committing the save both touch the
+            // EventKit store, which goes to disk. That ran on the main thread,
+            // in the middle of the HUD's confirmation animation; the reminder
+            // is already decided by this point, so none of it needs to be there.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let (title, due) = parse(text)
+                func done(_ result: Result<String, Error>) {
+                    DispatchQueue.main.async { completion(result) }
+                }
+                guard !title.isEmpty else { done(.failure(RemindersError.emptyTitle)); return }
+                guard let calendar = list(named: listName) else {
+                    done(.failure(RemindersError.noList)); return
+                }
 
-            let reminder = EKReminder(eventStore: store)
-            reminder.title = title
-            reminder.calendar = calendar
-            if let due {
-                reminder.dueDateComponents = Calendar.current.dateComponents(
-                    [.year, .month, .day, .hour, .minute], from: due)
-                reminder.addAlarm(EKAlarm(absoluteDate: due))
-            }
+                let reminder = EKReminder(eventStore: store)
+                reminder.title = title
+                reminder.calendar = calendar
+                if let due {
+                    reminder.dueDateComponents = Calendar.current.dateComponents(
+                        [.year, .month, .day, .hour, .minute], from: due)
+                    reminder.addAlarm(EKAlarm(absoluteDate: due))
+                }
 
-            do {
-                try store.save(reminder, commit: true)
-                var summary = title
-                if let due { summary += " · \(due.formatted(date: .abbreviated, time: .shortened))" }
-                completion(.success(summary))
-            } catch {
-                completion(.failure(error))
+                do {
+                    try store.save(reminder, commit: true)
+                    var summary = title
+                    if let due { summary += " · \(due.formatted(date: .abbreviated, time: .shortened))" }
+                    done(.success(summary))
+                } catch {
+                    done(.failure(error))
+                }
             }
         }
     }

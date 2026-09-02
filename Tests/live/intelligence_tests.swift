@@ -79,11 +79,23 @@ struct P {
             print("      \(line)")
         }
 
-        print("\n=== timeout safety: model disabled path ===")
+        print("\n=== timeout safety ===")
         let t = Date()
         let line = await intel.reply(action: "Opening Claude", heard: "", timeout: 0.001)
         check("impossible timeout still returns a canned line",
               Intelligence.cannedReplies.contains(line), "\(line), \(ms(t))")
+        // The timeout has to actually bound the wait, not merely decide what to
+        // return once the model finishes in its own time. The old helper waited
+        // on a task group, so a slow generation held the caller — and the HUD —
+        // for however long it took, whatever the timeout said.
+        check("...and returns at the deadline rather than when the model finishes",
+              Date().timeIntervalSince(t) < 1.0, ms(t))
+
+        let answerStart = Date()
+        _ = await intel.answer("give me a long rambling history of the roman empire",
+                               timeout: 0.05)
+        check("a slow answer is abandoned, not waited out",
+              Date().timeIntervalSince(answerStart) < 1.5, ms(answerStart))
 
         print("\n\(failures == 0 ? "ALL INTELLIGENCE TESTS PASSED" : "\(failures) FAILURE(S)")")
         exit(failures == 0 ? 0 : 1)

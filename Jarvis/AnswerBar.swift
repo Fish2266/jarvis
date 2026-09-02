@@ -159,7 +159,7 @@ final class AnswerBar {
         dismiss()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let screen = Self.activeScreen()
+        guard let screen = Self.activeScreen() else { return }
         let size = Readout.size(for: text, screenWidth: screen.frame.width)
         let origin = CGPoint(x: screen.frame.midX - size.width / 2,
                              y: screen.frame.minY + 120)
@@ -196,11 +196,14 @@ final class AnswerBar {
         view = nil
     }
 
-    private static func activeScreen() -> NSScreen {
+    /// The screen the pointer is on. nil when there is no screen at all —
+    /// every display asleep or disconnected — which `screens[0]` used to turn
+    /// into a crash rather than a strip that simply doesn't appear.
+    private static func activeScreen() -> NSScreen? {
         let mouse = NSEvent.mouseLocation
         return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
             ?? NSScreen.main
-            ?? NSScreen.screens[0]
+            ?? NSScreen.screens.first
     }
 }
 

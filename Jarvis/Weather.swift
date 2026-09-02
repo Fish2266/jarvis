@@ -10,6 +10,14 @@ final class Weather: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
     private var pending: [(Result<String, Error>) -> Void] = []
     private var fetching = false
+    private var watchdog: DispatchWorkItem?
+
+    /// Nothing here is guaranteed to call back. Location can sit on an
+    /// unanswered permission prompt, and a hung request would leave `fetching`
+    /// set for good — every later "what's the weather" appending to `pending`
+    /// and never being answered, with the HUD stuck on "Checking the weather".
+    /// This turns that into an honest failure.
+    private static let overallTimeout: TimeInterval = 12
 
     private override init() {
         super.init()
@@ -43,6 +51,13 @@ final class Weather: NSObject, CLLocationManagerDelegate {
         pending.append(completion)
         guard !fetching else { return }
         fetching = true
+
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self, self.fetching else { return }
+            self.finish(.failure(WeatherError.noLocation))
+        }
+        self.watchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.overallTimeout, execute: watchdog)
 
         if let lat = Prefs.manualLatitude, let lon = Prefs.manualLongitude {
             fetch(latitude: lat, longitude: lon)
@@ -120,6 +135,8 @@ final class Weather: NSObject, CLLocationManagerDelegate {
     }
 
     private func finish(_ result: Result<String, Error>) {
+        watchdog?.cancel()
+        watchdog = nil
         fetching = false
         let callbacks = pending
         pending.removeAll()

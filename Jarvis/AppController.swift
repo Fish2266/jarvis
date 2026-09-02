@@ -419,7 +419,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showMonitor() {
-        if monitor == nil { monitor = MonitorWindow() }
+        if monitor == nil {
+            let window = MonitorWindow()
+            window.onVisibilityChange = { [weak self] visible in
+                self?.engine.wantsLevels = visible
+            }
+            monitor = window
+        }
         NSApp.activate(ignoringOtherApps: true)
         monitor?.showWindow(nil)
         monitor?.window?.makeKeyAndOrderFront(nil)
