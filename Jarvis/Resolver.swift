@@ -13,6 +13,9 @@ struct Resolution {
     /// You explicitly asked for a new one ("open a new gmail tab"), so don't
     /// reuse a tab that's already open.
     var forceNewTab: Bool = false
+    /// You asked for it to come to you ("bring over xcode") rather than to be
+    /// taken to it, so its windows move to the desktop you're on.
+    var bringHere: Bool = false
 }
 
 /// Tier 1: pure string work, no model, effectively instant.
@@ -28,6 +31,21 @@ enum Resolver {
         "open up", "take me to", "show me", "go to", "get me",
         "launch", "open", "start", "boot", "run", "load", "play",
     ]
+
+    /// Verbs that mean "come to me" rather than "take me there".
+    ///
+    /// "bring up" is deliberately absent: it lives in `verbs` and still means
+    /// open. The two lists are searched together for the *longest* match, so
+    /// "bring up chrome" keeps its old behaviour — eight characters of
+    /// "bring up" beat the five of the bare "bring" that would fetch it here.
+    static let bringVerbs = [
+        "bring over", "bring here", "bring me", "move over", "move here",
+        "send over", "send here", "pull over", "drag over", "bring", "gimme",
+    ]
+
+    /// Direction words that can trail the target instead of leading it, as in
+    /// "bring xcode over here". None of them are part of an app's name.
+    static let bringTail: Set<String> = ["over", "here", "to", "me", "my", "way", "now"]
 
     static let assistantNames = ["hey jarvis", "ok jarvis", "okay jarvis", "jarvis"]
 
@@ -64,8 +82,9 @@ enum Resolver {
         return (text, nil)
     }
 
-    /// Strips a leading "jarvis" and a leading verb, returning what's left.
-    static func strip(_ normalized: String) -> (target: String, sawVerb: Bool) {
+    /// Drops a leading "jarvis" and nothing else — what you actually said, minus
+    /// the name you said it to.
+    static func withoutAssistantName(_ normalized: String) -> String {
         var text = normalized
 
         for name in assistantNames where text == name || text.hasPrefix(name + " ") {
@@ -82,12 +101,45 @@ enum Resolver {
             words.removeFirst()
             text = words.joined(separator: " ")
         }
+        return text
+    }
 
-        for verb in verbs where text == verb || text.hasPrefix(verb + " ") {
-            let rest = String(text.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces)
-            return (rest, true)
+    /// Strips a leading "jarvis" and a leading verb, returning what's left and
+    /// whether the verb was one that asks the app to come here.
+    static func strip(_ normalized: String)
+        -> (target: String, sawVerb: Bool, bringHere: Bool) {
+        let text = withoutAssistantName(normalized)
+
+        // Longest match across both lists rather than first-listed, so a verb
+        // that is a prefix of another can't shadow it from either direction.
+        var matched = ""
+        var bring = false
+        for verb in verbs
+        where verb.count > matched.count && (text == verb || text.hasPrefix(verb + " ")) {
+            matched = verb
+            bring = false
         }
-        return (text, false)
+        for verb in bringVerbs
+        where verb.count > matched.count && (text == verb || text.hasPrefix(verb + " ")) {
+            matched = verb
+            bring = true
+        }
+        guard !matched.isEmpty else { return (text, false, false) }
+
+        var rest = String(text.dropFirst(matched.count)).trimmingCharacters(in: .whitespaces)
+        if bring { rest = dropBringTail(rest) }
+        return (rest, true, bring)
+    }
+
+    /// "bring xcode over here" -> "xcode". Never strips the last word standing,
+    /// so "bring me here" doesn't dissolve into nothing.
+    static func dropBringTail(_ text: String) -> String {
+        var words = text.split(separator: " ").map(String.init)
+        while words.count > 1, let last = words.last, bringTail.contains(last) {
+            words.removeLast()
+        }
+        if words.count == 1, bringTail.contains(words[0]) { return "" }
+        return words.joined(separator: " ")
     }
 
     /// For commands whose phrase is a prefix ("remind me to …"), matches the
@@ -177,18 +229,27 @@ enum Resolver {
         }
 
         let (whole, spokenProfile) = stripProfileQualifier(raw, profiles: Browser.chromeProfiles())
-        let (rawTarget, sawVerb) = strip(whole)
+        let spoken = withoutAssistantName(whole)
+        let (rawTarget, sawVerb, bringHere) = strip(whole)
         let (target, forceNewTab) = stripNewQualifier(rawTarget, macros: macros)
 
         // Exact-phrase commands get their own pass. They must not be reachable
-        // by containment: "how do i sleep better" contains "sleep".
+        // by containment — "how do i sleep better" contains "sleep" — and
+        // equally not through a verb: "open sleep" asks to open something
+        // called Sleep, and "bring over sleep" asks to fetch a window. Neither
+        // is a request to sleep the Mac.
+        //
+        // Matching the sentence with only the assistant's name taken off is
+        // what draws that line. Comparing the verb-stripped target instead let
+        // any verb at all through, because "open sleep" reduces to "sleep";
+        // "jarvis go to sleep" still lands here, because dropping the name
+        // leaves the phrase itself.
         for macro in macros where macro.enabled && macro.kind.requiresExactPhrase {
             for phrase in macro.phrases {
                 let p = PhraseMatcher.normalize(phrase)
                 guard !p.isEmpty else { continue }
                 let tolerance = p.count >= 7 ? 1 : 0
-                if PhraseMatcher.editDistance(target, p) <= tolerance
-                    || PhraseMatcher.editDistance(whole, p) <= tolerance {
+                if PhraseMatcher.editDistance(spoken, p) <= tolerance {
                     return Resolution(macro: macro, confidence: 1.0, source: .macro)
                 }
             }
@@ -211,7 +272,8 @@ enum Resolver {
             }
             if score >= macroThreshold, score > (best?.confidence ?? 0) {
                 best = Resolution(macro: macro, confidence: score, source: .macro,
-                                  chromeProfile: spokenProfile, forceNewTab: forceNewTab)
+                                  chromeProfile: spokenProfile, forceNewTab: forceNewTab,
+                                  bringHere: bringHere)
             }
         }
         if let best { return best }
@@ -225,7 +287,8 @@ enum Resolver {
         let macro = Macro(name: entry.name, phrases: [entry.normalized],
                           kind: .app, target: entry.path)
         return Resolution(macro: macro, confidence: score, source: .appIndex,
-                          chromeProfile: spokenProfile, forceNewTab: forceNewTab)
+                          chromeProfile: spokenProfile, forceNewTab: forceNewTab,
+                          bringHere: bringHere)
     }
 
     /// Candidate list handed to the model when Tier 1 finds nothing.

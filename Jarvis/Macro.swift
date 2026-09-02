@@ -25,6 +25,11 @@ enum ActionKind: String, Codable, CaseIterable {
 
     /// Kinds that speak for themselves, so the usual generated reply is skipped.
     var handlesOwnReply: Bool { self == .sleep }
+
+    /// Kinds with a window that "bring it over" could move to this desktop.
+    /// The rest ignore the request and just do their usual thing, so "gimme
+    /// the weather" still reports the weather rather than falling flat.
+    var canBeBrought: Bool { self == .app || self == .url }
 }
 
 /// One user-programmable command.

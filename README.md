@@ -20,7 +20,14 @@ Clap twice, then say a command. Any of these verbs work interchangeably:
 
 > **open** · **start** · **start up** · **launch** · **fire up** · **boot up** · **run** · **pull up** · **bring up** · **spin up** · **go to** · **take me to**
 
+A second family of verbs goes the other way. **open** takes *you* to the app, switching desktops if it lives on another one. **bring** fetches the app to *you*, moving its windows onto the desktop you are already looking at:
+
+> **bring** · **bring over** · **move over** · **send over** · **pull over** · **drag over** · **gimme**
+
 ```
+clap clap  "open xcode"                -> switches to Xcode's desktop
+clap clap  "bring over xcode"          -> Xcode's windows come to this desktop
+clap clap  "bring xcode over here"     -> the same, said the long way
 clap clap  "start up the craft"        -> Prism Launcher
 clap clap  "open chrome"               -> Google Chrome
 clap clap  "jarvis, open my email"     -> Gmail, in the Work profile
@@ -104,9 +111,10 @@ It says goodnight, then sleeps about two and a half seconds later so the line is
 
 **It can only sleep.** There is no shutdown, restart, or log-out anywhere in the app. The action runs `/usr/bin/pmset sleepnow` with `["sleepnow"]` as a literal argument list — no user input reaches it, and it has exactly one call site. The only other process the app ever launches is `/usr/bin/open`, for Chrome.
 
-Two guards keep it from firing by accident:
+Three guards keep it from firing by accident:
 
 - **Near-exact matching.** Ordinary commands match loosely, which is why "start up the craft" works. That would also fire on "how do i sleep better", since it contains "sleep". Sleep phrases instead need the whole sentence to match, give or take a typo — so "tell me about sleep", "what time should i go to sleep" and "power down chrome" all leave the Mac awake.
+- **A verb in front means you meant something else.** "open sleep" is a request to open an app called Sleep; "bring over sleep" is a request to fetch a window. Neither sleeps the Mac. Sleep phrases are matched against what you said with only "jarvis" removed, so "jarvis, go to sleep" still works while "launch sleep" does not.
 - **The model can't reach it.** Sleep commands are withheld from the list Apple Intelligence chooses from, so a misheard question can never put the Mac to sleep. It only happens when you actually say the phrase.
 
 ## Reminders

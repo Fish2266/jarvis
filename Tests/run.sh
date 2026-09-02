@@ -73,3 +73,11 @@ swiftc -O $T -o "$OUT/audit" \
     Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
     Tests/audit/main.swift
 "$OUT/audit"
+
+echo
+echo "===== bring it over ====="
+swiftc -O $T -o "$OUT/bring" \
+    Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
+    Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
+    Tests/bring/main.swift
+"$OUT/bring"

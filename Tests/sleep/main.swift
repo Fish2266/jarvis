@@ -24,6 +24,10 @@ print("\n=== these must NOT ===")
 for said in ["how do i sleep better", "remind me to go to sleep early",
              "what time should i go to sleep", "tell me about sleep",
              "is my mac asleep", "open sleep cycle", "power down chrome",
+             // A verb in front means you are asking to open or fetch something
+             // called Sleep, not to sleep the Mac. These used to sleep it.
+             "open sleep", "launch sleep", "start sleep", "get me sleep",
+             "bring over sleep", "bring sleep here", "bring me good night",
              "remind me to say good night to grandma", "whats a good night light",
              "open chrome", "start up the craft", "what's the weather"] {
     let r = resolve(said)

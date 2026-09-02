@@ -424,17 +424,23 @@ final class ListenerEngine {
         state = .triggered
         chime(.triggered)
 
-        log(String(format: "%@ (%.2f via %@)", macro.actionLabel,
+        // "bring over xcode" is a different action from "open xcode", and the
+        // HUD and the spoken line should both say so.
+        let label = resolution.bringHere && macro.kind.canBeBrought
+            ? "Bringing \(macro.name) over" : macro.actionLabel
+
+        log(String(format: "%@ (%.2f via %@)", label,
                    resolution.confidence, resolution.source.rawValue))
 
-        if Prefs.showHUD { HUDOverlay.shared.confirm(headline: macro.actionLabel) }
+        if Prefs.showHUD { HUDOverlay.shared.confirm(headline: label) }
 
         // The action runs now. Everything below this line is decoration.
         perform(macro, payload: resolution.payload,
-                forceNewTab: resolution.forceNewTab) { [weak self] extra in
+                forceNewTab: resolution.forceNewTab,
+                bringHere: resolution.bringHere) { [weak self] extra in
             guard let self, id == self.runID else { return }
             guard !macro.kind.handlesOwnReply else { return }
-            self.speakReply(for: macro, heard: heard, extra: extra, id: id)
+            self.speakReply(action: label, heard: heard, extra: extra, id: id)
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.4) { [weak self] in
@@ -445,9 +451,26 @@ final class ListenerEngine {
 
     /// `completion` carries any result worth mentioning in the spoken line.
     private func perform(_ macro: Macro, payload: String?, forceNewTab: Bool = false,
+                         bringHere: Bool = false,
                          completion: @escaping (String?) -> Void) {
         switch macro.kind {
         case .app:
+            // "bring over xcode": move its windows to this desktop *before*
+            // activating, or activating would send us to the desktop it was on
+            // and the move would be a visible yank back.
+            if bringHere, let running = Spaces.runningApp(atPath: macro.target) {
+                if Spaces.bring(pid: running.processIdentifier) {
+                    log("brought \(macro.name) to this desktop")
+                } else {
+                    // No desktop move available — still better to focus it than
+                    // to do nothing, which is what "open" would have done.
+                    log("couldn't move \(macro.name) between desktops; focusing it instead")
+                }
+                running.activate(options: [.activateAllWindows])
+                completion(nil)
+                return
+            }
+
             // Chrome with a profile goes through the profile-aware launcher so
             // "open chrome on work" lands in the right window.
             if macro.chromeProfile != nil,
@@ -470,6 +493,16 @@ final class ListenerEngine {
             }
 
         case .url:
+            // Same reasoning as an app, one step earlier: bring the browser to
+            // this desktop *before* a tab gets focused, or the AppleScript
+            // activate that focuses it would drag us to the browser's desktop
+            // and the move would look like a yank back.
+            if bringHere, let chrome = Browser.chromeURL(),
+               let running = Spaces.runningApp(atPath: chrome.path),
+               Spaces.bring(pid: running.processIdentifier) {
+                log("brought the browser to this desktop")
+            }
+
             let openFresh: () -> Void = { [weak self] in
                 if Browser.open(macro.target, chromeProfile: macro.chromeProfile) {
                     if let profile = Browser.profileName(for: macro.chromeProfile) {
@@ -548,10 +581,10 @@ final class ListenerEngine {
 
     // MARK: - The voice line (never blocks anything)
 
-    private func speakReply(for macro: Macro, heard: String, extra: String?, id: Int) {
+    private func speakReply(action label: String, heard: String, extra: String?, id: Int) {
         guard Prefs.speakReply || Prefs.showHUD else { return }
 
-        var action = macro.actionLabel
+        var action = label
         if let extra { action += ": \(extra)" }
 
         if !Prefs.useModel || !Intelligence.shared.isAvailable {
