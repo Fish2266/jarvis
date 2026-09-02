@@ -108,12 +108,9 @@ enum Browser {
     /// activate comes forward with the profile flag dropped.
     @discardableResult
     static func open(_ urlString: String?, chromeProfile: String?) -> Bool {
-        if let profile = chromeProfile, !profile.isEmpty, let chrome = chromeURL(),
-           let binary = executable(inside: chrome) {
-            let process = Process()
-            process.executableURL = binary
-            process.arguments = chromeArguments(profile: profile, url: urlString)
-            if (try? process.run()) != nil { return true }
+        if let profile = chromeProfile, !profile.isEmpty,
+           launch(profile: profile, url: urlString) {
+            return true
         }
 
         guard let urlString, !urlString.isEmpty else {
@@ -125,6 +122,138 @@ enum Browser {
         }
         guard let url = URL(string: urlString) else { return false }
         return NSWorkspace.shared.open(url)
+    }
+
+    /// Starts a new Chrome instance pointed at a profile. See `open` for why
+    /// the binary runs directly rather than through `open(1)`.
+    private static func launch(profile: String, url: String?) -> Bool {
+        guard let chrome = chromeURL(), let binary = executable(inside: chrome)
+        else { return false }
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = chromeArguments(profile: profile, url: url)
+        return (try? process.run()) != nil
+    }
+
+    // MARK: - A window in a particular profile
+
+    /// Window ids Jarvis has opened for each profile.
+    ///
+    /// Chrome will not say which profile a window belongs to — the same wall
+    /// `pickTab` runs into — so there is nothing to ask. This learns it the
+    /// only way available: note which window appears when we launch a profile,
+    /// and remember it. Touched only on `scriptQueue`, which is serial.
+    private static var profileWindows: [String: Int] = [:]
+
+    /// Brings up a window in a particular Chrome profile, reusing one already
+    /// open for it rather than stacking up new ones.
+    ///
+    /// "Already open for it" is the whole difficulty. Two signals stand in for
+    /// the profile Chrome won't report, in order of how much they can be
+    /// trusted: a window Jarvis itself opened for this profile earlier, and a
+    /// window showing a page signed into this profile's account — the same
+    /// account-in-the-title trick `pickTab` uses. Miss both and it opens a new
+    /// window, which is what happened every time before.
+    static func openProfileWindow(_ profile: String, reuseExisting: Bool,
+                                  completion: @escaping (Bool) -> Void) {
+        scriptQueue.async {
+            if reuseExisting {
+                if let known = profileWindows[profile] {
+                    if focusWindow(known) {
+                        DispatchQueue.main.async { completion(true) }
+                        return
+                    }
+                    profileWindows[profile] = nil   // that window is gone
+                }
+                if let email = profileEmail(for: profile),
+                   let found = window(showing: email), focusWindow(found) {
+                    profileWindows[profile] = found
+                    DispatchQueue.main.async { completion(true) }
+                    return
+                }
+            }
+
+            let before = windowIDs()
+            guard launch(profile: profile, url: nil) else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            DispatchQueue.main.async { completion(true) }
+
+            // Note which window Chrome put up, so asking again focuses this one
+            // rather than opening another. Runs after the caller has been told
+            // the command succeeded, so the spoken reply doesn't wait on it.
+            for _ in 0..<16 {
+                Thread.sleep(forTimeInterval: 0.25)
+                if let fresh = windowIDs().subtracting(before).first {
+                    profileWindows[profile] = fresh
+                    return
+                }
+            }
+        }
+    }
+
+    /// Every open Chrome window, by its own id.
+    private static func windowIDs() -> Set<Int> {
+        let source = """
+        set out to ""
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return ""
+                repeat with w in windows
+                    set out to out & (id of w) & linefeed
+                end repeat
+            end tell
+        end timeout
+        return out
+        """
+        guard let raw = runScript(source) else { return [] }
+        return Set(raw.split(separator: "\n").compactMap { Int($0) })
+    }
+
+    /// The window holding a tab signed into `email`, if there is one. Matching
+    /// happens inside Chrome so only the window id has to come back.
+    private static func window(showing email: String) -> Int? {
+        guard !email.isEmpty else { return nil }
+        let source = """
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return ""
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if (title of t) contains "\(escapeForAppleScript(email))" then
+                            return (id of w) as text
+                        end if
+                    end repeat
+                end repeat
+            end tell
+        end timeout
+        return ""
+        """
+        guard let raw = runScript(source) else { return nil }
+        return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Brings one Chrome window to the front by its own id.
+    private static func focusWindow(_ id: Int) -> Bool {
+        let source = """
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return "NONE"
+                repeat with w in windows
+                    -- Chrome hands back an id that never compares equal to a
+                    -- bare number; without the coercion this matches nothing.
+                    if ((id of w) as text) is "\(id)" then
+                        set index of w to 1
+                        activate
+                        return "OK"
+                    end if
+                end repeat
+            end tell
+        end timeout
+        return "NONE"
+        """
+        return runScript(source) == "OK"
     }
 
     // MARK: - A fresh tab or window

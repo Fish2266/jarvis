@@ -94,5 +94,32 @@ for (text, target, verb, bring) in [
           "\(got)")
 }
 
+print("\n=== finding the running app to bring ===")
+check("an app running from its own path is found",
+      Spaces.runningApp(atPath: "/System/Library/CoreServices/Finder.app") != nil)
+check("a path with no app there yields nothing",
+      Spaces.runningApp(atPath: "/Applications/DefinitelyNotReal.app") == nil)
+check("an empty path yields nothing", Spaces.runningApp(atPath: "") == nil)
+
+// The Minecraft bug: anything launched from Downloads runs translocated, so
+// the running app's bundleURL is a random path under /private/var/folders and
+// never equals where the command points. A bundle that claims an identifier
+// belonging to a running app is the same shape — same identity, wrong path.
+let fake = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("JarvisTranslocationTest.app")
+try? FileManager.default.createDirectory(at: fake.appendingPathComponent("Contents"),
+                                         withIntermediateDirectories: true)
+let info: [String: Any] = ["CFBundleIdentifier": "com.apple.finder",
+                           "CFBundleExecutable": "Finder"]
+if let data = try? PropertyListSerialization.data(fromPropertyList: info,
+                                                  format: .xml, options: 0) {
+    try? data.write(to: fake.appendingPathComponent("Contents/Info.plist"))
+}
+let byIdentifier = Spaces.runningApp(atPath: fake.path)
+check("an app running from a different path is still found, by its identifier",
+      byIdentifier?.bundleIdentifier == "com.apple.finder",
+      byIdentifier?.bundleURL?.path ?? "nil")
+try? FileManager.default.removeItem(at: fake)
+
 print(failures == 0 ? "\nALL BRING TESTS PASSED" : "\n\(failures) BRING TESTS FAILED")
 exit(failures == 0 ? 0 : 1)

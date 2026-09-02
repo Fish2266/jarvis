@@ -64,11 +64,23 @@ enum Spaces {
     }
 
     /// The running instance of the app installed at `path`, if there is one.
+    ///
+    /// Falls back to the bundle identifier, and that fallback is the common
+    /// case rather than the exotic one: anything launched from Downloads runs
+    /// *translocated* — macOS copies the bundle to a random read-only path
+    /// under /private/var/folders and runs it from there — so the running app's
+    /// bundleURL never equals where it lives on disk. Matching only on path
+    /// meant "bring over minecraft" found nothing and quietly fell through to
+    /// an ordinary activate, which looks exactly like the feature not working.
     static func runningApp(atPath path: String) -> NSRunningApplication? {
         guard !path.isEmpty else { return nil }
         let wanted = URL(fileURLWithPath: path).standardizedFileURL
-        return NSWorkspace.shared.runningApplications.first {
-            $0.bundleURL?.standardizedFileURL == wanted
+        let running = NSWorkspace.shared.runningApplications
+
+        if let exact = running.first(where: { $0.bundleURL?.standardizedFileURL == wanted }) {
+            return exact
         }
+        guard let identifier = Bundle(url: wanted)?.bundleIdentifier else { return nil }
+        return running.first { $0.bundleIdentifier == identifier }
     }
 }

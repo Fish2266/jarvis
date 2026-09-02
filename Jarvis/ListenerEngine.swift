@@ -511,11 +511,17 @@ final class ListenerEngine {
             }
 
             // Chrome with a profile goes through the profile-aware launcher so
-            // "open chrome on work" lands in the right window.
-            if macro.chromeProfile != nil,
+            // "open chrome on work" lands in the right window — and reuses the
+            // window already open for that profile instead of stacking up a new
+            // one each time, the way opening any other running app would.
+            if let profile = macro.chromeProfile, !profile.isEmpty,
                macro.target == Browser.chromeURL()?.path {
-                Browser.open(nil, chromeProfile: macro.chromeProfile)
-                completion(nil)
+                Browser.openProfileWindow(profile,
+                                          reuseExisting: Prefs.reuseTabs && !forceNewTab) {
+                    [weak self] opened in
+                    if !opened { self?.log("couldn't open Chrome in profile \(profile)") }
+                    completion(nil)
+                }
                 return
             }
             openApp(macro, completion: completion)
