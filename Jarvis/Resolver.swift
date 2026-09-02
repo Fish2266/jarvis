@@ -16,6 +16,10 @@ struct Resolution {
     /// You asked for it to come to you ("bring over xcode") rather than to be
     /// taken to it, so its windows move to the desktop you're on.
     var bringHere: Bool = false
+    /// "open a new tab" / "open a new window" — a fresh tab or window in the
+    /// browser rather than just bringing it forward. Only set for a command
+    /// that opens the browser itself; a website command uses `forceNewTab`.
+    var browserFresh: Browser.Fresh? = nil
 }
 
 /// Tier 1: pure string work, no model, effectively instant.
@@ -215,6 +219,21 @@ enum Resolver {
         return rest.isEmpty ? (target, false) : (rest, true)
     }
 
+    /// Reads "tab" or "window" out of what was said.
+    ///
+    /// Taken from the words rather than from which phrase happened to match, so
+    /// it holds up whatever the command is named. "window" wins over "tab"
+    /// wherever both appear, because that word is the only thing separating
+    /// "open a new window" from "open a new tab".
+    static func freshBrowser(in text: String) -> Browser.Fresh? {
+        var found: Browser.Fresh?
+        for word in text.split(separator: " ") {
+            if word == "window" || word == "windows" { return .window }
+            if found == nil, word == "tab" || word == "tabs" { found = .tab }
+        }
+        return found
+    }
+
     static func resolveFast(transcript: String, macros: [Macro]) -> Resolution? {
         let raw = PhraseMatcher.normalize(transcript)
         guard !raw.isEmpty else { return nil }
@@ -276,7 +295,12 @@ enum Resolver {
                                   bringHere: bringHere)
             }
         }
-        if let best { return best }
+        if var best {
+            // Only an app command opens the browser itself. A website command
+            // means a tab of that site, which `forceNewTab` already covers.
+            if best.macro.kind == .app { best.browserFresh = freshBrowser(in: whole) }
+            return best
+        }
 
         // Nothing user-defined matched. If they clearly asked to open something,
         // fall back to the installed-app list so every app works for free.

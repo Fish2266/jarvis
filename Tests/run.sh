@@ -81,3 +81,11 @@ swiftc -O $T -o "$OUT/bring" \
     Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
     Tests/bring/main.swift
 "$OUT/bring"
+
+echo
+echo "===== a fresh tab ====="
+swiftc -O $T -o "$OUT/tabs" \
+    Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
+    Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
+    Tests/tabs/main.swift
+"$OUT/tabs"

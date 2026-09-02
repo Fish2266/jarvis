@@ -424,10 +424,29 @@ final class ListenerEngine {
         state = .triggered
         chime(.triggered)
 
+        // Whether this is really "make me a tab" rather than "open the browser".
+        // Decided once, because the action and the HUD line have to agree — and
+        // a pinned profile rules it out either way: Chrome tells scripts nothing
+        // about profiles, so only the profile-aware launcher can land a window
+        // in the right one.
+        let fresh: Browser.Fresh? = {
+            guard let fresh = resolution.browserFresh,
+                  macro.kind == .app, macro.chromeProfile == nil,
+                  macro.target == Browser.chromeURL()?.path
+            else { return nil }
+            return fresh
+        }()
+
         // "bring over xcode" is a different action from "open xcode", and the
         // HUD and the spoken line should both say so.
-        let label = resolution.bringHere && macro.kind.canBeBrought
-            ? "Bringing \(macro.name) over" : macro.actionLabel
+        let label: String
+        if resolution.bringHere && macro.kind.canBeBrought {
+            label = "Bringing \(macro.name) over"
+        } else if let fresh {
+            label = fresh == .tab ? "New tab" : "New window"
+        } else {
+            label = macro.actionLabel
+        }
 
         log(String(format: "%@ (%.2f via %@)", label,
                    resolution.confidence, resolution.source.rawValue))
@@ -437,7 +456,8 @@ final class ListenerEngine {
         // The action runs now. Everything below this line is decoration.
         perform(macro, payload: resolution.payload,
                 forceNewTab: resolution.forceNewTab,
-                bringHere: resolution.bringHere) { [weak self] extra in
+                bringHere: resolution.bringHere,
+                browserFresh: fresh) { [weak self] extra in
             guard let self, id == self.runID else { return }
             guard !macro.kind.handlesOwnReply else { return }
             self.speakReply(action: label, heard: heard, extra: extra, id: id)
@@ -452,6 +472,7 @@ final class ListenerEngine {
     /// `completion` carries any result worth mentioning in the spoken line.
     private func perform(_ macro: Macro, payload: String?, forceNewTab: Bool = false,
                          bringHere: Bool = false,
+                         browserFresh: Browser.Fresh? = nil,
                          completion: @escaping (String?) -> Void) {
         switch macro.kind {
         case .app:
@@ -471,6 +492,24 @@ final class ListenerEngine {
                 return
             }
 
+            // "open a new tab". Opening an app that is already running only
+            // brings its existing window forward, so Chrome has to be asked for
+            // the tab directly.
+            if let browserFresh {
+                Browser.openFresh(browserFresh) { [weak self] made in
+                    guard let self else { return }
+                    if made {
+                        self.log("new Chrome \(browserFresh.rawValue)")
+                        completion(nil)
+                    } else {
+                        // Automation refused, or Chrome didn't answer in time.
+                        self.log("couldn't make a new \(browserFresh.rawValue) — opening Chrome instead")
+                        self.openApp(macro, completion: completion)
+                    }
+                }
+                return
+            }
+
             // Chrome with a profile goes through the profile-aware launcher so
             // "open chrome on work" lands in the right window.
             if macro.chromeProfile != nil,
@@ -479,18 +518,7 @@ final class ListenerEngine {
                 completion(nil)
                 return
             }
-            let url = URL(fileURLWithPath: macro.target)
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = true
-            NSWorkspace.shared.openApplication(at: url, configuration: config) { [weak self] _, error in
-                DispatchQueue.main.async {
-                    if let error {
-                        self?.log("couldn't open \(macro.name): \(error.localizedDescription)")
-                        if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open \(macro.name)") }
-                    }
-                    completion(nil)
-                }
-            }
+            openApp(macro, completion: completion)
 
         case .url:
             // Same reasoning as an app, one step earlier: bring the browser to
@@ -575,6 +603,22 @@ final class ListenerEngine {
                     }
                     completion(nil)
                 }
+            }
+        }
+    }
+
+    /// Plain "open this": activates it if it's running, launches it if not.
+    private func openApp(_ macro: Macro, completion: @escaping (String?) -> Void) {
+        let url = URL(fileURLWithPath: macro.target)
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { [weak self] _, error in
+            DispatchQueue.main.async {
+                if let error {
+                    self?.log("couldn't open \(macro.name): \(error.localizedDescription)")
+                    if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open \(macro.name)") }
+                }
+                completion(nil)
             }
         }
     }

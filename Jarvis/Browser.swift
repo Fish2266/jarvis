@@ -102,9 +102,55 @@ enum Browser {
         return NSWorkspace.shared.open(url)
     }
 
-    // MARK: - Reusing an open tab
+    // MARK: - A fresh tab or window
+
+    /// What a spoken "new tab" or "new window" asks the browser to make.
+    enum Fresh: String { case tab, window }
 
     private static let scriptQueue = DispatchQueue(label: "jarvis.applescript")
+
+    /// Makes a fresh tab or window in Chrome.
+    ///
+    /// There is no launch flag for this. `open -a "Google Chrome"` on a running
+    /// Chrome just activates it, which is why "open a new tab" used to do
+    /// nothing but bring the window you already had to the front. Chrome's
+    /// scripting interface is the only way to ask for a tab, so this goes
+    /// through AppleScript like tab reuse does and wants the same Automation
+    /// permission. Any failure — refused, slow, no Chrome — reports false so
+    /// the caller can fall back to simply opening the browser.
+    static func openFresh(_ what: Fresh, completion: @escaping (Bool) -> Void) {
+        let body: String
+        switch what {
+        case .window:
+            body = "make new window"
+        case .tab:
+            // There has to be a window before it can hold a tab.
+            body = """
+            if (count of windows) is 0 then
+                        make new window
+                    else
+                        make new tab at end of tabs of front window
+                    end if
+            """
+        }
+
+        let source = """
+        with timeout of 5 seconds
+            tell application "Google Chrome"
+                activate
+                \(body)
+            end tell
+        end timeout
+        return "OK"
+        """
+
+        scriptQueue.async {
+            let made = runScript(source) == "OK"
+            DispatchQueue.main.async { completion(made) }
+        }
+    }
+
+    // MARK: - Reusing an open tab
 
     /// True when an already-open tab is close enough to count as "the same page".
     /// Host must match (ignoring www.); if the target names a path, the tab's

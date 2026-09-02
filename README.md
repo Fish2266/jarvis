@@ -34,6 +34,7 @@ clap clap  "jarvis, open my email"     -> Gmail, in the Work profile
 clap clap  "open youtube"              -> YouTube, in the Connor profile
 clap clap  "wake up daddy's home"      -> Claude
 clap clap  "what's it like outside"    -> weather on screen
+clap clap  "open a new tab"            -> a fresh tab in the front window
 clap clap  "open new tab on personal"  -> a fresh Chrome window, Connor profile
 clap clap  "remind me september 3rd at 10am to brush my teeth"
 ```

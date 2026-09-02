@@ -108,7 +108,8 @@ extension Macro {
             macros.append(Macro(
                 name: "Chrome",
                 phrases: ["chrome", "google chrome", "new tab", "a new tab",
-                          "new window", "the browser", "browser"],
+                          "another tab", "new window", "another window",
+                          "the browser", "browser"],
                 kind: .app, target: chrome.path))
         }
         macros.append(Macro(
