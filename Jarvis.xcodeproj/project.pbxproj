@@ -137,6 +137,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Jarvis asks Google Chrome whether a page is already open, so it can switch to that tab instead of opening another copy.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "After a double clap, Jarvis watches for a few seconds to see whether you gesture at it. The camera is off at every other time.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Jarvis uses your location only to look up the current weather when you ask for it.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Jarvis listens for a double clap and the command you say after it.";
@@ -163,6 +164,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Jarvis asks Google Chrome whether a page is already open, so it can switch to that tab instead of opening another copy.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "After a double clap, Jarvis watches for a few seconds to see whether you gesture at it. The camera is off at every other time.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Jarvis uses your location only to look up the current weather when you ask for it.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Jarvis listens for a double clap and the command you say after it.";

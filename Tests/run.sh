@@ -89,3 +89,15 @@ swiftc -O $T -o "$OUT/tabs" \
     Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
     Tests/tabs/main.swift
 "$OUT/tabs"
+
+echo
+echo "===== hand gestures ====="
+swiftc -O $T -o "$OUT/gestures" \
+    Jarvis/Gestures.swift Tests/gestures/main.swift
+"$OUT/gestures"
+
+echo
+echo "===== keyboard trigger ====="
+swiftc -O $T -o "$OUT/trigger" \
+    Jarvis/Prefs.swift Jarvis/ClapDetector.swift Tests/trigger/main.swift
+"$OUT/trigger"

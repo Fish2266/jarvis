@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import CoreGraphics
 import os
 
 enum ListenerState: Equatable {
@@ -7,6 +8,7 @@ enum ListenerState: Equatable {
     case noPermission
     case listening          // waiting for a double clap
     case armed              // double clap heard, listening for a command
+    case watching           // nothing said — the camera has the window to itself
     case thinking           // deterministic match failed, asking the model
     case triggered
     case failed(String)
@@ -24,6 +26,7 @@ final class ListenerEngine {
     private let engine = AVAudioEngine()
     private let detector = ClapDetector()
     private let speech = SpeechListener()
+    private let hands = HandTracker()
 
     private(set) var state: ListenerState = .off {
         didSet { if state != oldValue { onState?(state) } }
@@ -41,9 +44,37 @@ final class ListenerEngine {
     var wantsLevels = false
     var onLog: ((String) -> Void)?
     var onTranscript: ((String) -> Void)?
+    /// Set only while the Clap Monitor is on screen, same bargain as `wantsLevels`.
+    var onPreview: ((CGImage?, [CameraPreviewView.Hand], String) -> Void)?
+    var onCameraStopped: (() -> Void)?
 
     private var tapInstalled = false
     private var phraseWindow: TimeInterval = 6.0
+
+    /// How long the camera stays open after a double clap. Longer than the
+    /// phrase window on purpose: saying nothing is how you ask for a gesture,
+    /// and the microphone has to be allowed to give up first.
+    private let gestureWindow: TimeInterval = 8.0
+    /// How much longer it stays open after a gesture lands, so moving two
+    /// desktops over doesn't need a second double clap.
+    private let gestureChain: TimeInterval = 2.5
+    /// How long words keep the camera muted after the last one arrived.
+    ///
+    /// Must be longer than `dictationSettle`, and is: a phrase that is about to
+    /// resolve into a command has to get there before a hand that happens to be
+    /// moving can, or both would fire.
+    private let speechGrace: TimeInterval = 1.4
+
+    /// Whether the camera is open for the phrase in progress.
+    private var watching = false
+    private var watchWork: DispatchWorkItem?
+    /// Clap Monitor's "Camera check": the camera runs without a clap, and
+    /// gestures are reported rather than performed.
+    private(set) var cameraCheck = false
+    /// Whether this phrase's camera clock has been restarted from the moment
+    /// frames began. Once only — a chained gesture must not win a fresh window
+    /// by way of the camera reporting itself ready again.
+    private var watchStarted = false
 
     private var macros: [Macro] = MacroStore.load()
     private var lastHeard = ""
@@ -64,6 +95,7 @@ final class ListenerEngine {
         detector.config = Prefs.sensitivity.config
         wireDetector()
         wireSpeech()
+        wireHands()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(configurationChanged),
@@ -105,10 +137,68 @@ final class ListenerEngine {
         }
     }
 
+    private func wireHands() {
+        hands.onLog = { [weak self] line in self?.log(line) }
+        hands.onGesture = { [weak self] gesture in self?.handle(gesture) }
+        hands.onPreview = { [weak self] image, drawn, note in
+            self?.onPreview?(image, drawn, note)
+        }
+        // Opening a camera cold takes seconds — five, the first time, measured.
+        // Counting those against the window meant the very first gesture after
+        // launch had no chance at all: the window closed before a single frame
+        // arrived. So the clock starts when the camera does.
+        hands.onReady = { [weak self] in
+            guard let self, self.watching, !self.watchStarted else { return }
+            self.watchStarted = true
+            self.log("camera ready")
+            self.scheduleWatchEnd(after: self.gestureWindow)
+        }
+    }
+
+    /// Opens the capture session ahead of time, without starting it.
+    ///
+    /// The first double clap of a session used to spend five seconds — measured
+    /// — opening the camera, which is most of the window you have to gesture in.
+    /// The window now waits for the camera, but waiting is still waiting.
+    func prewarmCamera() {
+        guard Prefs.gestures else { return }
+        hands.prepare()
+    }
+
+    /// The Clap Monitor coming and going. Preview frames cost a scale and a
+    /// colour conversion each, so they are only produced while something is
+    /// drawing them.
+    func wantsPreview(_ wanted: Bool) { hands.wantsPreview(wanted) }
+
+    /// Runs the camera with no clap and no consequences, for working out why a
+    /// gesture isn't landing. Eight seconds at a time is no way to debug this.
+    func setCameraCheck(_ on: Bool) {
+        guard cameraCheck != on else { return }
+        cameraCheck = on
+        if on {
+            guard HandTracker.authorized else {
+                log("camera check: no camera access")
+                cameraCheck = false
+                return
+            }
+            log("camera check on — nothing will be performed")
+            hands.start()
+        } else {
+            log("camera check off")
+            if !watching { hands.stop() }
+            onCameraStopped?()
+        }
+    }
+
     private func wireSpeech() {
         speech.onPartial = { [weak self] text in
             guard let self, self.state == .armed, !self.didFire else { return }
             self.lastHeard = text
+
+            // Words are arriving, so the camera stops looking. A hand moving
+            // while you talk is you talking with your hands — and this is the
+            // half of the bargain that says a spoken command wins.
+            if !text.isEmpty { self.hands.mute(for: self.speechGrace) }
             self.onTranscript?(text)
 
             guard let resolution = Resolver.resolveFast(transcript: text, macros: self.macros)
@@ -137,7 +227,10 @@ final class ListenerEngine {
             guard let self, self.state == .armed, !self.didFire else { return }
             self.settleWork?.cancel()
             guard let text, !text.isEmpty else {
-                self.log("nothing heard, standing down")
+                // Saying nothing is not a failure here — it's the other half of
+                // the bargain. `standDown` keeps the camera if it's still open.
+                self.log(self.watching ? "nothing said — over to the camera"
+                                       : "nothing heard, standing down")
                 self.standDown()
                 return
             }
@@ -156,6 +249,20 @@ final class ListenerEngine {
             SpeechListener.requestAuthorization { status in
                 if status != .authorized {
                     self.log("speech recognition not authorized (\(status.rawValue))")
+                }
+                // Asked for now rather than in the middle of a phrase: granting
+                // the camera is not the same as turning it on, and a permission
+                // sheet dropping over the screen two seconds after a double clap
+                // is a poor way to find out the feature exists.
+                //
+                // Not *in front of* the microphone, though. `done` starts the
+                // whole listener, and nothing about hearing you should wait on
+                // an answer about the camera — a dialog left sitting there
+                // unanswered would otherwise mean Jarvis never starts at all.
+                if Prefs.gestures, HandTracker.authorization == .notDetermined {
+                    HandTracker.requestAccess { granted in
+                        if !granted { self.log("camera denied — gestures are off") }
+                    }
                 }
                 done(true)
             }
@@ -205,6 +312,7 @@ final class ListenerEngine {
     func stop() {
         settleWork?.cancel()
         speech.stop(deliverEnd: false)
+        stopWatching()
         EscapeHotKey.shared.unregister()
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
@@ -264,7 +372,11 @@ final class ListenerEngine {
         state = .armed
         chime(.armed)
 
-        if Prefs.showHUD { HUDOverlay.shared.beginListening(seconds: phraseWindow) }
+        startWatching()
+
+        if Prefs.showHUD {
+            HUDOverlay.shared.beginListening(seconds: watching ? gestureWindow : phraseWindow)
+        }
         EscapeHotKey.shared.register()
         log(EscapeHotKey.shared.isRegistered
             ? "escape armed — press Esc to cancel"
@@ -334,6 +446,7 @@ final class ListenerEngine {
         let id = runID
         EscapeHotKey.shared.unregister()
         speech.stop(deliverEnd: false)
+        stopWatching()
         detector.resetSequence()
         state = .thinking
         chime(.triggered)
@@ -393,12 +506,25 @@ final class ListenerEngine {
         }
     }
 
+    /// The microphone is done with this phrase — either it heard nothing, or
+    /// what it heard was nothing we could use.
+    ///
+    /// That is not the end of the phrase if the camera is still open. It is
+    /// precisely the case the camera exists for, so the reticle stays up, Escape
+    /// stays armed, and the window closes on its own when `watchWork` fires.
     private func standDown() {
         settleWork?.cancel()
-        EscapeHotKey.shared.unregister()
         speech.stop(deliverEnd: false)
-        if Prefs.showHUD { HUDOverlay.shared.standDown() }
         detector.resetSequence()
+
+        if watching {
+            state = .watching
+            if Prefs.showHUD { HUDOverlay.shared.setStatus("WATCHING") }
+            return
+        }
+
+        EscapeHotKey.shared.unregister()
+        if Prefs.showHUD { HUDOverlay.shared.standDown() }
         state = engine.isRunning ? .listening : .off
     }
 
@@ -407,7 +533,8 @@ final class ListenerEngine {
     /// Deliberately unconditional: if the HUD is on screen, Escape clears it, no
     /// matter what the state machine thinks is happening.
     func cancel() {
-        let wasActive = state == .armed || state == .thinking || state == .triggered
+        let wasActive = state == .armed || state == .watching
+            || state == .thinking || state == .triggered
         guard wasActive || HUDOverlay.shared.isShowing else { return }
         runID += 1
         didFire = true
@@ -415,11 +542,156 @@ final class ListenerEngine {
         log("cancelled")
         EscapeHotKey.shared.unregister()
         speech.stop(deliverEnd: false)
+        stopWatching()
         VoiceBox.shared.stop()
         HUDOverlay.shared.cancel()
         AnswerBar.shared.dismiss()
         detector.resetSequence()
         if wasActive { state = engine.isRunning ? .listening : .off }
+    }
+
+    // MARK: - Gestures
+
+    /// Opens the camera for this phrase.
+    ///
+    /// Never called from anywhere but a double clap, which is the whole promise:
+    /// the camera is off, and then for eight seconds it isn't, and then it's off
+    /// again. Every path that ends a phrase calls `stopWatching`.
+    private func startWatching() {
+        guard Prefs.gestures else { return }
+        guard HandTracker.authorized else {
+            if HandTracker.authorization == .denied {
+                log("camera access is off — gestures are unavailable")
+            }
+            return
+        }
+        watching = true
+        watchStarted = cameraCheck      // already live, so the clock is honest
+        hands.start()
+        scheduleWatchEnd(after: gestureWindow)
+        log("camera on — watching for a gesture")
+    }
+
+    private func stopWatching() {
+        watchWork?.cancel()
+        watchWork = nil
+        guard watching else { return }
+        watching = false
+        // Camera check outlives the phrase — it was switched on by hand and is
+        // switched off the same way.
+        guard !cameraCheck else { return }
+        hands.stop()
+        onCameraStopped?()
+    }
+
+    /// (Re)arms the camera's deadline. Used both to open the window and to push
+    /// it out after a gesture lands.
+    private func scheduleWatchEnd(after seconds: TimeInterval) {
+        watchWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.watching else { return }
+            self.log("camera off")
+            self.stopWatching()
+            // `watching` is false now, so this does the real teardown.
+            if self.state == .watching || self.state == .triggered { self.standDown() }
+        }
+        watchWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    /// A gesture landed.
+    ///
+    /// It beats the microphone outright: whatever was being said is abandoned
+    /// and the listening window closes, which is the mirror image of a spoken
+    /// command closing the camera. The camera itself stays open a little longer,
+    /// so moving two desktops over is one thought rather than two double claps.
+    private func handle(_ gesture: Gesture) {
+        // Camera check only stands in for the real thing while nothing is armed.
+        // Clapping and *then* gesturing is a genuine request and has to behave
+        // like one — a debug view that quietly swallows real commands is worse
+        // than no debug view, because it makes the feature look broken.
+        guard watching else {
+            guard cameraCheck else { return }
+            let would = perform(gesture, dryRun: true)
+            log("camera check: would fire \(would.headline)"
+                + (would.detail.isEmpty ? "" : " — \(would.detail)")
+                + " — clap first to actually run it")
+            return
+        }
+        guard state == .armed || state == .watching || state == .triggered else { return }
+
+        // Stop listening. `didFire` shuts every voice path — the settle timer,
+        // a late `onEnd`, an in-flight model call — and bumping `runID` makes
+        // sure anything already in the air lands stale.
+        runID += 1
+        didFire = true
+        settleWork?.cancel()
+        speech.stop(deliverEnd: false)
+        detector.resetSequence()
+
+        // The reticle goes first, so the screen is already clear as Mission
+        // Control arrives. No confirmation burst either: a gesture should feel
+        // like reaching out and moving the desktop yourself, and the desktop
+        // moving *is* the feedback — a full-screen flash announcing what you
+        // just watched happen only gets in the way, and a cyan ring hanging
+        // over Mission Control for another few seconds is worse. Spoken
+        // commands keep both, because there the HUD is the only thing that
+        // says it heard you correctly.
+        HUDOverlay.shared.dismissNow()
+        perform(gesture)
+        state = .triggered
+        chime(.triggered)
+
+        // Deliberately no spoken reply. You are mid-motion and may well swipe
+        // again in a moment; a generated line per swipe would queue up behind
+        // itself and still be talking three desktops later.
+        scheduleWatchEnd(after: gestureChain)
+
+        let id = runID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, id == self.runID, self.state == .triggered else { return }
+            self.state = self.watching ? .watching
+                                       : (self.engine.isRunning ? .listening : .off)
+        }
+    }
+
+    @discardableResult
+    private func perform(_ gesture: Gesture,
+                         dryRun: Bool = false) -> (headline: String, detail: String) {
+        let rerouted = gesture.action(canSwitchDesktops: Spaces.canSwitchDesktops)
+
+        switch rerouted {
+        case .missionControl:
+            let why = rerouted == gesture
+                ? "hands apart"
+                : "hand \(gesture == .desktopLeft ? "right" : "left"), and desktop "
+                  + "switching needs Accessibility"
+            guard !dryRun else {
+                return ("Mission Control", rerouted == gesture ? "" : "instead of a desktop switch")
+            }
+            log("gesture: \(why) -> Mission Control")
+            guard Spaces.missionControl() else {
+                log("couldn't open Mission Control")
+                return ("Mission Control", "Couldn't open it")
+            }
+            return ("Mission Control", "")
+
+        case .desktopLeft, .desktopRight:
+            let direction: Spaces.Direction = rerouted == .desktopLeft ? .left : .right
+            let moved = rerouted == .desktopLeft ? "right" : "left"
+            guard !dryRun else {
+                return ("Desktop \(direction.label)", "hand went \(moved)")
+            }
+            log("gesture: hand \(moved) -> desktop on the \(direction.label)")
+            guard Spaces.switchDesktop(direction) else {
+                // Only reachable if the grant is withdrawn between the check
+                // above and here, which is a race worth surviving rather than
+                // a state worth designing for.
+                log("couldn't switch desktops")
+                return ("Desktop \(direction.label)", "Couldn't switch")
+            }
+            return ("Desktop \(direction.label)", "")
+        }
     }
 
     // MARK: - Executing a command
@@ -435,6 +707,8 @@ final class ListenerEngine {
 
         EscapeHotKey.shared.unregister()
         speech.stop(deliverEnd: false)
+        // A command was said, so the camera has nothing left to decide.
+        stopWatching()
         detector.resetSequence()
         state = .triggered
         chime(.triggered)

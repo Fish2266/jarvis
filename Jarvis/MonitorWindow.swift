@@ -7,11 +7,16 @@ final class MonitorWindow: NSWindowController, NSWindowDelegate {
     /// Fires as the window appears and disappears, so the engine can stop
     /// reporting levels to a window that isn't there.
     var onVisibilityChange: ((Bool) -> Void)?
+    /// "Camera check" pressed — run the camera without arming anything, and
+    /// report gestures without performing them.
+    var onCameraCheck: ((Bool) -> Void)?
 
     private let meter = NSLevelIndicator()
     private let numbers = NSTextField(labelWithString: "")
     private let transcript = NSTextField(labelWithString: "")
     private let logView = NSTextView()
+    private let preview = CameraPreviewView()
+    private let cameraButton = NSButton()
     private var peakHold: Float = 0
     private var peakDecayTimer: Timer?
     private var logLines = 0
@@ -36,7 +41,7 @@ final class MonitorWindow: NSWindowController, NSWindowDelegate {
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Jarvis — Clap Monitor"
@@ -49,6 +54,13 @@ final class MonitorWindow: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         onVisibilityChange?(false)
+        // Closing the window is as good as pressing the button again. Leaving
+        // the camera running behind a window nobody can see is exactly the
+        // thing this whole feature promises not to do.
+        if cameraButton.state == .on {
+            cameraButton.state = .off
+            onCameraCheck?(false)
+        }
         // The meter used to keep ticking twenty times a second for the rest of
         // the session, drawing into a window nobody could see.
         peakDecayTimer?.invalidate()
@@ -103,6 +115,24 @@ final class MonitorWindow: NSWindowController, NSWindowDelegate {
         logView.autoresizingMask = [.width]
         scroll.documentView = logView
 
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.clear(note: "Camera off")
+
+        cameraButton.title = "Camera check"
+        cameraButton.setButtonType(.pushOnPushOff)
+        cameraButton.bezelStyle = .rounded
+        cameraButton.target = self
+        cameraButton.action = #selector(toggleCamera)
+        cameraButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let cameraHint = NSTextField(labelWithString:
+            "Runs the camera without clapping. Gestures are only reported \u{2014} unless you clap first, and then they run for real.")
+        cameraHint.font = .systemFont(ofSize: 11)
+        cameraHint.textColor = .tertiaryLabelColor
+        cameraHint.lineBreakMode = .byWordWrapping
+        cameraHint.maximumNumberOfLines = 2
+        cameraHint.translatesAutoresizingMaskIntoConstraints = false
+
         let hint = NSTextField(labelWithString:
             "Clap twice. Each clap should spike well past the threshold; if the log says a sound was ignored, raise sensitivity.")
         hint.font = .systemFont(ofSize: 11)
@@ -111,7 +141,8 @@ final class MonitorWindow: NSWindowController, NSWindowDelegate {
         hint.maximumNumberOfLines = 3
         hint.translatesAutoresizingMaskIntoConstraints = false
 
-        [meter, numbers, transcript, scroll, hint].forEach { content.addSubview($0) }
+        [meter, numbers, transcript, preview, cameraButton, cameraHint, scroll, hint]
+            .forEach { content.addSubview($0) }
 
         NSLayoutConstraint.activate([
             meter.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
@@ -127,9 +158,22 @@ final class MonitorWindow: NSWindowController, NSWindowDelegate {
             transcript.leadingAnchor.constraint(equalTo: meter.leadingAnchor),
             transcript.trailingAnchor.constraint(equalTo: meter.trailingAnchor),
 
-            scroll.topAnchor.constraint(equalTo: transcript.bottomAnchor, constant: 10),
+            preview.topAnchor.constraint(equalTo: transcript.bottomAnchor, constant: 10),
+            preview.leadingAnchor.constraint(equalTo: meter.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: meter.trailingAnchor),
+            preview.heightAnchor.constraint(equalToConstant: 240),
+
+            cameraButton.topAnchor.constraint(equalTo: preview.bottomAnchor, constant: 8),
+            cameraButton.leadingAnchor.constraint(equalTo: meter.leadingAnchor),
+
+            cameraHint.centerYAnchor.constraint(equalTo: cameraButton.centerYAnchor),
+            cameraHint.leadingAnchor.constraint(equalTo: cameraButton.trailingAnchor, constant: 10),
+            cameraHint.trailingAnchor.constraint(equalTo: meter.trailingAnchor),
+
+            scroll.topAnchor.constraint(equalTo: cameraButton.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: meter.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: meter.trailingAnchor),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
 
             hint.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 8),
             hint.leadingAnchor.constraint(equalTo: meter.leadingAnchor),
@@ -149,6 +193,23 @@ final class MonitorWindow: NSWindowController, NSWindowDelegate {
         numbers.stringValue = String(
             format: "level %.4f   background %.4f   threshold %.4f",
             level, background, threshold)
+    }
+
+    @objc private func toggleCamera() {
+        onCameraCheck?(cameraButton.state == .on)
+        if cameraButton.state == .off { preview.clear(note: "Camera off") }
+    }
+
+    /// A frame from the tracker. Dropped on the floor while the window is shut,
+    /// though the tracker shouldn't be sending any then either.
+    func showCamera(image: CGImage?, hands: [CameraPreviewView.Hand], note: String) {
+        guard isVisible else { return }
+        preview.show(image: image, hands: hands, note: note)
+    }
+
+    func cameraStopped() {
+        guard isVisible else { return }
+        preview.clear(note: cameraButton.state == .on ? "Camera starting…" : "Camera off")
     }
 
     func setTranscript(_ text: String) {

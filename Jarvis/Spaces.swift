@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import Carbon.HIToolbox
 
 /// Brings a running app's windows to the desktop you're looking at.
 ///
@@ -82,5 +84,67 @@ enum Spaces {
         }
         guard let identifier = Bundle(url: wanted)?.bundleIdentifier else { return nil }
         return running.first { $0.bundleIdentifier == identifier }
+    }
+}
+
+// MARK: - Moving *you* between desktops
+
+extension Spaces {
+
+    enum Direction {
+        case left, right
+
+        var label: String { self == .left ? "left" : "right" }
+    }
+
+    /// Shows Mission Control, and asks for nothing to do it.
+    ///
+    /// Opening the app is the entire API: it's a trampoline that tells the Dock
+    /// to put the overview up and then exits, and opening it again while the
+    /// overview is up puts it away. Sending ^↑ would do the same thing and would
+    /// need Accessibility, so this is the better bargain — the two-handed
+    /// gesture works on a fresh install with nothing granted but the camera.
+    @discardableResult
+    static func missionControl() -> Bool {
+        let url = URL(fileURLWithPath: "/System/Applications/Mission Control.app")
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
+        return true
+    }
+
+    /// Whether `switchDesktop` can currently do anything.
+    static var canSwitchDesktops: Bool { AXIsProcessTrusted() }
+
+    /// Switches to the next desktop, by synthesising ^← / ^→.
+    ///
+    /// This is the one thing here that needs Accessibility, and not for want of
+    /// trying: SkyLight exposes `SLSManagedDisplaySetCurrentSpace`, which is how
+    /// space switchers used to do this without any permission at all, and on
+    /// macOS 26 it is simply ignored — the call returns, the desktop does not
+    /// change. So the keyboard shortcut it is.
+    ///
+    /// Two consequences worth knowing. It goes through the user's own shortcut,
+    /// so someone who has turned "Move left a space" off in Keyboard Shortcuts
+    /// gets nothing, and it needs Accessibility, which is granted per code
+    /// signature — rebuild the app and macOS may want it granted again. Both
+    /// fail visibly rather than quietly: this returns false and the caller says
+    /// so on the HUD.
+    @discardableResult
+    static func switchDesktop(_ direction: Direction) -> Bool {
+        guard canSwitchDesktops else { return false }
+
+        let key = CGKeyCode(direction == .left ? kVK_LeftArrow : kVK_RightArrow)
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
+        else { return false }
+
+        down.flags = .maskControl
+        up.flags = .maskControl
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
     }
 }

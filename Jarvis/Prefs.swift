@@ -1,4 +1,5 @@
 import Foundation
+import Carbon.HIToolbox
 
 enum Sensitivity: Int, CaseIterable {
     case low = 0, medium = 1, high = 2
@@ -17,6 +18,57 @@ enum Sensitivity: Int, CaseIterable {
         case .low:    return ClapConfig(absoluteThreshold: 0.090, attackRatio: 12)
         case .medium: return ClapConfig(absoluteThreshold: 0.045, attackRatio: 8)
         case .high:   return ClapConfig(absoluteThreshold: 0.020, attackRatio: 6)
+        }
+    }
+}
+
+/// What the trigger shortcut is bound to.
+///
+/// A global hot key really is global: while it's registered, the combination
+/// belongs to Jarvis and no other app will see it. ⌘J is what you'd reach for
+/// first and it's the default, but it's also Finder's View Options and Xcode's
+/// jump bar — hence the alternatives and the off switch.
+enum TriggerShortcut: Int, CaseIterable {
+    case off = 0
+    case commandJ = 1
+    case optionCommandJ = 2
+    case controlCommandJ = 3
+    case optionSpace = 4
+
+    var title: String {
+        switch self {
+        case .off:              return "Off (double clap only)"
+        case .commandJ:         return "\u{2318}J"
+        case .optionCommandJ:   return "\u{2325}\u{2318}J"
+        case .controlCommandJ:  return "\u{2303}\u{2318}J"
+        case .optionSpace:      return "\u{2325}Space"
+        }
+    }
+
+    /// Combinations another app is likely to want back.
+    var note: String? {
+        switch self {
+        case .commandJ:  return "also Finder's View Options and Xcode's jump bar"
+        case .optionSpace: return "also Spotlight, on some setups"
+        default: return nil
+        }
+    }
+
+    var keyCode: UInt32? {
+        switch self {
+        case .off: return nil
+        case .commandJ, .optionCommandJ, .controlCommandJ: return UInt32(kVK_ANSI_J)
+        case .optionSpace: return UInt32(kVK_Space)
+        }
+    }
+
+    var modifiers: UInt32 {
+        switch self {
+        case .off:              return 0
+        case .commandJ:         return UInt32(cmdKey)
+        case .optionCommandJ:   return UInt32(optionKey | cmdKey)
+        case .controlCommandJ:  return UInt32(controlKey | cmdKey)
+        case .optionSpace:      return UInt32(optionKey)
         }
     }
 }
@@ -40,6 +92,8 @@ enum Prefs {
         static let reverb = "reverbAmount"
         static let voiceNudge = "voiceNudgeShown"
         static let answerQuestions = "answerQuestions"
+        static let gestures = "handGestures"
+        static let trigger = "triggerShortcut"
     }
 
     static func registerDefaults() {
@@ -54,6 +108,8 @@ enum Prefs {
             Key.reuseTabs: true,
             Key.voiceEffects: true,
             Key.answerQuestions: true,
+            Key.gestures: true,
+            Key.trigger: TriggerShortcut.commandJ.rawValue,
             Key.reverb: 0,
         ])
     }
@@ -127,6 +183,21 @@ enum Prefs {
     static var answerQuestions: Bool {
         get { d.bool(forKey: Key.answerQuestions) }
         set { d.set(newValue, forKey: Key.answerQuestions) }
+    }
+
+    /// Watch for hand gestures after a double clap.
+    ///
+    /// The camera only ever runs inside that window — this is the switch for
+    /// whether it runs at all, not for whether it runs now.
+    static var gestures: Bool {
+        get { d.bool(forKey: Key.gestures) }
+        set { d.set(newValue, forKey: Key.gestures) }
+    }
+
+    /// Global shortcut that arms Jarvis, alongside the double clap.
+    static var triggerShortcut: TriggerShortcut {
+        get { TriggerShortcut(rawValue: d.integer(forKey: Key.trigger)) ?? .commandJ }
+        set { d.set(newValue.rawValue, forKey: Key.trigger) }
     }
 
     static var useCelsius: Bool {

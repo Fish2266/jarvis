@@ -17,13 +17,18 @@ final class EscapeHotKey {
     private var hotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
 
-    private static let signature: OSType = 0x4A525653   // 'JRVS'
+    static let signature: OSType = 0x4A525653   // 'JRVS'
+    /// Distinguishes this hot key from `TriggerHotKey`'s. Carbon calls every
+    /// handler installed on the target for *every* hot key, so without checking
+    /// the id, pressing the trigger shortcut would also fire Escape's action —
+    /// arming Jarvis and instantly cancelling it.
+    static let hotKeyID: UInt32 = 1
 
     func register() {
         guard hotKey == nil else { return }
         installHandlerIfNeeded()
 
-        let id = EventHotKeyID(signature: Self.signature, id: 1)
+        let id = EventHotKeyID(signature: Self.signature, id: Self.hotKeyID)
         let status = RegisterEventHotKey(UInt32(kVK_Escape), 0, id,
                                          GetApplicationEventTarget(), 0, &hotKey)
         if status != noErr { hotKey = nil }
@@ -41,7 +46,10 @@ final class EscapeHotKey {
         guard handler == nil else { return }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ -> OSStatus in
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
+            guard HotKeyEvent.id(of: event) == EscapeHotKey.hotKeyID else {
+                return OSStatus(eventNotHandledErr)
+            }
             DispatchQueue.main.async { EscapeHotKey.shared.onPress?() }
             return noErr
         }, 1, &spec, nil, &handler)

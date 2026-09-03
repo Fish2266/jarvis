@@ -86,6 +86,88 @@ A leading "jarvis" or "hey jarvis" is optional and always stripped.
 
 Every app on your Mac already works without setup: 100 were indexed here — including `~/Downloads` — so "open audacity" or "fire up xcode" just work. Macros are for renaming things — teaching it that *"the craft"* means Minecraft.
 
+## Triggering it
+
+Two ways in, and they do the same thing:
+
+- **Double clap.**
+- **A keyboard shortcut**, under **Keyboard trigger** in the menu. Default is ⌘J.
+
+The shortcut is a Carbon hot key, the same mechanism Escape uses, so it needs no Accessibility or Input Monitoring permission. But it is registered for as long as Jarvis is enabled rather than for a few seconds after a clap, which means it genuinely takes that combination away from every other app — ⌘J is also Finder's View Options and Xcode's jump bar. Hence ⌥⌘J, ⌃⌘J and ⌥Space as alternatives, and **Off** if you'd rather only clap. Pausing Jarvis hands the combination back.
+
+If another app got there first, registration fails, Jarvis says so, and clapping still works.
+
+## Hand gestures
+
+The same double clap that opens the microphone also opens the camera. Say a command and it behaves exactly as it always has. Say nothing, and it watches your hands instead.
+
+```
+clap clap  (say nothing)  pull both hands apart   -> Mission Control
+clap clap  (say nothing)  move one hand left      -> the desktop on the right
+clap clap  (say nothing)  move one hand right     -> the desktop on the left
+```
+
+The directions are the trackpad's, not the mouse's: your hand drags the row of desktops past you, the same way a three-finger swipe does.
+
+The capture session is built a couple of seconds after launch, because opening a camera cold takes several seconds — measured — and that used to come out of the window you had to gesture in. Building a session is not running one: no frames, and the camera indicator stays dark. The window also doesn't start counting until frames actually arrive, so a slow open costs you nothing.
+
+**The camera is only ever on inside that window.** It is off before the clap and off again about eight seconds later — sooner if you say something, sooner still if you gesture. There is no always-on mode and no preview window; the green light coming on is the honest signal that the window is open.
+
+### Voice and hands never both fire
+
+The two halves take turns, and the rule is the same in both directions — **whoever commits first wins, and the other one stops.**
+
+| What happens | Microphone | Camera |
+|---|---|---|
+| You say a command | resolves and runs it | **off**, immediately |
+| You say nothing | gives up after ~6 s | keeps watching for ~8 s |
+| You say something it can't place | gives up | keeps watching — this is what gestures are for |
+| You gesture | **stops listening**, mid-phrase if need be | runs it, stays open ~2.5 s for another |
+| Escape | cancels | cancels |
+
+While words are actually arriving the camera stops looking altogether — frames are dropped without being analysed. That mute outlasts the last word by 1.4 seconds, which is deliberately longer than the pause a spoken command waits out before it fires: a phrase that is *about* to resolve always gets there before a hand that happens to be moving can.
+
+After a gesture lands the camera stays open a moment longer, so moving two desktops over is one thought rather than two double claps.
+
+Gestures are quiet in the other sense too: **no spoken reply, no confirmation burst, and the reticle goes the moment one lands** — so the screen is already clear as Mission Control arrives. Nothing flashes up to announce what happened — a gesture should feel like reaching out and moving the desktop yourself, and the desktop moving *is* the feedback. Spoken commands keep their confirmation, because there the HUD is the only thing that tells you it heard you correctly.
+
+### What counts as a gesture
+
+Jarvis keeps a second and a half of where your hands have been, and on every frame asks one question: is there any moment in that trail which, paired with right now, makes a gesture?
+
+That replaced an earlier design that measured from an *anchor* — a spot where your hands had been still for a moment. It was accurate and far too slow. A gesture could not begin until you had first stopped, so clapping and immediately pulling your hands apart was guaranteed to do nothing; worse, if the camera opened while you were already moving there was no still moment left to find, and the gesture was unrecognisable no matter how plainly you made it. Searching the trail costs 0.3 microseconds a frame — a thousandth of one percent of a core — and removes the wait entirely.
+
+- Travel at least **18%** of the frame, and finish inside **1.2 s**. Slower than that is repositioning, not a gesture.
+- Move **sideways** — the horizontal distance must beat the vertical by 1.6×, so reaching for your coffee isn't a command.
+- Throwing it clean **off the edge of the frame** works. A hand that vanishes within 0.12 of the edge has left the picture rather than stopped dead, so it's measured as having reached the edge — a lower bound on where it actually went, not a guess. Everything else still applies: the same thresholds decide, measured the same way. A hand resting near the edge that blinks out fires nothing.
+- For Mission Control, **both** hands do some of the work. One hand sweeping past a hand resting on the desk opens the same gap and is not the same gesture.
+
+Hand detection in an ordinary room is gappy rather than steady, so four things work to keep hold of a hand that Vision keeps losing. The camera runs in its **widest format**: macOS publishes no field of view per format, but the shape gives it away — on Apple's built-in cameras the 16:9 modes are a vertical crop of the same sensor readout the 4:3 modes use whole, so this FaceTime camera's 1760×1328 is the same horizontal field as its default 1920×1080 with about a quarter more of you vertically. The commonest way to lose a gesture is a hand leaving the top or bottom of the picture. It is **pinned to 30 fps**, which caps the exposure with it — in dim light a webcam lengthens its exposure, and a hand moving through a long one arrives as a smear with no skeleton in it, so detection fails exactly when you're gesturing. A hand's position comes from the **wrist and knuckles when they're confident and the average of every joint Vision saw when they're not**, because a hand held at an angle loses precisely those anchor joints while the fingers stay perfectly visible. And the trail survives **0.45 s** of a hand not being seen at all.
+
+A hand may drop out of view for a couple of frames without losing its trail, and so may *one of two* — Vision loses a hand against a busy background constantly, and a pull-apart heads for the edges of the frame where it happens most. Only an absence longer than **0.45 s** starts over.
+
+A change in *how many* hands are up is a different question, and is counted in frames rather than seconds: **four in a row** of a new count before it is believed. Vision blinks for a frame or two, never for four. Crucially the frames are held rather than dropped while it decides, so when the change is believed the new trail starts at the frame the count first changed on — not an eighth of a second later with the opening of the gesture already spent. That matters more than it sounds, because the double clap that opens the camera *is* a change in hand count: hands together, then apart.
+
+What the anchor was really guarding against — a hand crossing half the frame on its way *in* reading as a swipe — is handled directly instead: a hand that first appears **at the edge** of the picture is presumed to still be arriving for 0.35 s. A hand that appears in open frame, because it was already up when the camera opened, is measurable from the instant it is seen. So there is nothing to wait for: clap, and pull your hands apart whenever you like.
+
+### Permissions
+
+Mission Control needs **only the camera**: Jarvis opens `Mission Control.app`, which is a trampoline that tells the Dock to show the overview.
+
+The two desktop swipes need **Accessibility** as well, and there is genuinely no way around it. Three routes were tried on macOS 26 and all three are dead ends:
+
+| Route | Result |
+|---|---|
+| `SLSManagedDisplaySetCurrentSpace` (private SkyLight) | ignored — the call returns, the desktop does not move |
+| `System Events … key code 124` (AppleScript) | *"osascript is not allowed to send keystrokes"* — the caller still needs Accessibility |
+| `CGEvent.postToPid(Dock)` (bypasses the HID tap) | delivered, but the space never changes |
+
+So Jarvis synthesises ^← / ^→ through the ordinary event tap, which needs Accessibility — and which also means someone who has turned those shortcuts off in **Keyboard ▸ Shortcuts ▸ Mission Control** gets nothing. Neither case shrugs: without Accessibility the swipes are rerouted to Mission Control rather than landing on a silent no-op, the menu says what is missing, and the Clap Monitor logs every gesture it acted on.
+
+Granting it needs an administrator, because macOS requires one for that pane. **Without it, all three gestures open Mission Control.** A two-handed pull-apart gets read as a one-handed swipe often enough to matter, and a gesture that could only have meant Mission Control landing on a silent no-op looks exactly like the whole feature being broken — so with the swipes unavailable, everything routes to the one thing that works with nothing granted. Better one gesture that always works than three where two do nothing.
+
+The menu shows what is missing, and **Hand gestures after a double clap** turns the whole thing off.
+
 ## Programming your own commands
 
 **Commands…** in the menu (or `⌘,`). Each command has:
@@ -248,9 +330,21 @@ Open-Meteo — no account, no API key. Location comes from Location Services, or
 
 **Clap Monitor…** shows a live meter, the current threshold, and a log of every sound it took or ignored, plus what it heard and which tier resolved it.
 
+It also shows **what the camera sees**: the frame Vision is being handed, with every joint it recognised drawn on top. Green means that hand has a position the recogniser can measure from; **amber means Vision can see the hand but can't place it confidently enough to use** — a different problem from not seeing it at all, and one you'd never guess from a log line. With two usable hands it draws the gap between them and the number, which is the figure the Mission Control gesture is trying to grow past 0.15.
+
+The preview is mirrored, so what you see and what the recogniser measures agree.
+
+While the monitor is shut, no frame is ever scaled or converted; while it's open the preview runs at 15 fps rather than the 30 the recogniser gets, and while Jarvis is muted because you're talking, it skips looking for hands altogether and just shows you the picture.
+
+**Camera check** runs the camera without a clap — eight seconds at a time is no way to work out why a gesture isn't landing. Gestures are reported rather than performed, so your desktops don't fly past while you experiment. **Clap first and they run for real**, monitor open or not: the debug view stands in for the real thing only while nothing is armed, never in place of it. It turns itself off when the window closes.
+
 - Nothing registers → raise sensitivity to High.
 - *"ignored a loud sound — didn't decay like a clap"* → it heard you, but the sound was too sustained. Sharper claps, or move closer.
 - Random triggers → drop to Low.
+
+It logs the camera too. While the window is open it reports what Vision can actually see — *camera sees 2 hands* — and when the window closes it says how close you got: *gestures: widest two-hand spread 0.11 (needs 0.15)*, or *the camera never found a hand*. That turns "nothing happened" into something you can act on. Every gesture that does fire prints which way your hand went and what it did — *gesture: hand left -> desktop on the right*. If those ever disagree with each other, the camera is handing over a mirrored picture, and the one flip that decides it is `user(_:)`, nested inside `read(_:joints:)` in [HandTracker.swift](Jarvis/HandTracker.swift): change `1 - p.x` to `p.x`. Nothing else in the code knows which way round the frame is.
+
+Gestures too twitchy, or not twitchy enough, live in `GestureConfig` in [Gestures.swift](Jarvis/Gestures.swift) — `travel` is how far a hand must go, `spread` is how far apart two must get, `maxDuration` is how long it has to finish, and `changeSamples` is how many frames a new hand count must hold before it is believed.
 
 ## Tests
 
@@ -259,6 +353,12 @@ Open-Meteo — no account, no API key. Location comes from Location Services, or
 ```
 
 Offline, no mic or network: clap detection against synthetic audio (real claps, distant claps, sustained noise, speech-like bursts, music with rests, silence), phrase matching, command resolution — every verb, macros, installed-app fallback, a set of conversational phrases that must *not* fire, and a regression case pinning "the craft" to the right launcher — plus Chrome profile discovery and the check that commands saved before profiles existed still load.
+
+The keyboard trigger's shortcut table is checked for duplicates, bare keys with no modifier, and a clean round trip through the preference.
+
+The gesture recogniser runs offline against a synthetic stream of hand positions — every gesture, everything that must *not* fire, dropped frames, hands flung off the edge of the picture, a change in hand count mid-gesture, and the diagnosis it prints when nothing lands.
+
+Gestures are covered the same way: the recogniser takes timestamped hand positions rather than reading a clock, so a synthetic stream can assert on the awkward cases directly — a hand entering frame, a hand put back down, a slow drift across the desk, one hand sweeping past a resting one, a dropped frame mid-swipe.
 
 ```bash
 ./Tests/run-live.sh
@@ -271,3 +371,4 @@ Live: Apple Intelligence (both tiers plus the reply sanitiser), a real weather f
 - Ad-hoc signed, so macOS may re-ask for microphone access after a rebuild. Signing with your Apple ID team in Xcode's Signing & Capabilities makes it stick.
 - Running from Xcode launches a *second* copy alongside the installed one.
 - Escape is registered as a global hotkey only while listening, so it isn't swallowed from other apps the rest of the time. It needs no Accessibility permission.
+- Accessibility, needed only for the two desktop-switching gestures, is granted per code signature — an ad-hoc signed build may want it granted again after a rebuild, for the same reason the microphone does. Mission Control and everything else are unaffected.

@@ -28,6 +28,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.lastTranscript = text
             self?.monitor?.setTranscript(text)
         }
+        engine.onPreview = { [weak self] image, hands, note in
+            self?.monitor?.showCamera(image: image, hands: hands, note: note)
+        }
+        engine.onCameraStopped = { [weak self] in self?.monitor?.cameraStopped() }
 
         render(.off)
 
@@ -60,6 +64,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
+        TriggerHotKey.shared.onPress = { [weak self] in self?.engine.arm() }
+        // Only while Jarvis is actually listening. A hot key is registered
+        // globally, so binding one for a paused app takes the combination away
+        // from everything else and then does nothing with it — `arm()` is a
+        // no-op until the engine is running. Same bargain as `toggleEnabled`.
+        if Prefs.enabled { applyTriggerShortcut() }
+
         engine.requestPermissions { [weak self] micGranted in
             guard let self else { return }
             if !micGranted {
@@ -68,6 +79,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             if Prefs.enabled { self.engine.start() }
+            // Once the microphone is up and there's nothing competing for the
+            // main thread. Building the capture session does not turn the
+            // camera on — that still needs a clap.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.engine.prewarmCamera()
+            }
         }
     }
 
@@ -86,6 +103,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .noPermission: symbol = "exclamationmark.triangle"
         case .listening:    symbol = "hands.clap.fill"
         case .armed:        symbol = "mic.fill"
+        case .watching:     symbol = "hand.raised.fill"
         case .thinking:     symbol = "ellipsis.circle.fill"
         case .triggered:    symbol = "bolt.fill"
         case .failed:       symbol = "exclamationmark.triangle.fill"
@@ -103,6 +121,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .noPermission:  return "Microphone access denied"
         case .listening:     return "Listening — double clap, then say a command"
         case .armed:         return "Listening for a command (Esc to cancel)"
+        case .watching:      return "Watching for a hand gesture (Esc to cancel)"
         case .thinking:      return "Working out what you meant…"
         case .triggered:     return "On it…"
         case .failed(let m): return "Error: \(m)"
@@ -141,6 +160,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sensitivityItem.submenu = sensitivity
         menu.addItem(sensitivityItem)
 
+        let triggers = NSMenu()
+        for shortcut in TriggerShortcut.allCases {
+            let title = shortcut.note.map { "\(shortcut.title) — \($0)" } ?? shortcut.title
+            let item = NSMenuItem(title: title, action: #selector(pickTrigger(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.tag = shortcut.rawValue
+            item.state = shortcut == Prefs.triggerShortcut ? .on : .off
+            triggers.addItem(item)
+        }
+        // An unregistered hot key is not the same as a contested one: pausing
+        // Jarvis hands the combination back deliberately, and reporting that as
+        // a conflict sent you looking for a rival app that doesn't exist.
+        if Prefs.triggerShortcut != .off, let note = triggerNote() {
+            triggers.addItem(.separator())
+            let line = NSMenuItem(title: "    \(note)", action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            triggers.addItem(line)
+        }
+        let triggerItem = NSMenuItem(title: "Keyboard trigger", action: nil, keyEquivalent: "")
+        triggerItem.submenu = triggers
+        menu.addItem(triggerItem)
+
         menu.addItem(.separator())
         add(menu, "Commands…", #selector(showCommands), key: ",")
 
@@ -165,6 +207,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, "Reuse an open tab (no fixed profile)", #selector(toggleReuseTabs),
             checked: Prefs.reuseTabs)
         add(menu, "Show the HUD", #selector(toggleHUD), checked: Prefs.showHUD)
+
+        let gestures = add(menu, "Hand gestures after a double clap",
+                           #selector(toggleGestures), checked: Prefs.gestures)
+        if Prefs.gestures, let note = gestureNote() {
+            gestures.state = .mixed
+            let line = NSMenuItem(title: "    \(note)", action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            menu.addItem(line)
+        }
         add(menu, "Speak a reply", #selector(toggleSpeakReply), checked: Prefs.speakReply)
 
         let voices = NSMenu()
@@ -266,6 +317,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !engine.micAuthorized {
             add(menu, "Microphone is off — open Settings", #selector(openMicSettings))
         }
+        if Prefs.gestures, HandTracker.authorization == .denied {
+            add(menu, "Camera is off — open Settings", #selector(openCameraSettings))
+        }
+        if Prefs.gestures, HandTracker.authorized, !Spaces.canSwitchDesktops {
+            add(menu, "Desktop switching needs Accessibility — grant it",
+                #selector(openAccessibilitySettings))
+        }
 
         menu.addItem(.separator())
         add(menu, "Quit Jarvis", #selector(quit), key: "q")
@@ -296,12 +354,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             engine.stop()
         }
+        // Paused means paused: hand the combination back to whatever else wants it.
+        Prefs.enabled ? applyTriggerShortcut() : TriggerHotKey.shared.unregister()
     }
 
     @objc private func pickSensitivity(_ sender: NSMenuItem) {
         guard let level = Sensitivity(rawValue: sender.tag) else { return }
         Prefs.sensitivity = level
         engine.applySensitivity()
+    }
+
+    @objc private func pickTrigger(_ sender: NSMenuItem) {
+        guard let shortcut = TriggerShortcut(rawValue: sender.tag) else { return }
+        Prefs.triggerShortcut = shortcut
+        applyTriggerShortcut()
+    }
+
+    /// A global hot key is registered for as long as Jarvis is enabled, so it
+    /// really is taken away from every other app — worth saying out loud in the
+    /// log rather than leaving you to wonder where \u{2318}J went.
+    private func applyTriggerShortcut() {
+        let shortcut = Prefs.triggerShortcut
+        let ok = TriggerHotKey.shared.apply(shortcut)
+        guard shortcut != .off else { return }
+        if !ok { showError("Couldn't register \(shortcut.title) — another app already owns it. Pick a different keyboard trigger from the Jarvis menu.") }
     }
 
     @objc private func toggleSpeakReply() { Prefs.speakReply.toggle() }
@@ -367,6 +443,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Why the trigger shortcut isn't bound, if it isn't.
+    private func triggerNote() -> String? {
+        guard Prefs.enabled else { return "Jarvis is paused — other apps have it back" }
+        return TriggerHotKey.shared.conflicted
+            ? "Another app already owns that combination" : nil
+    }
+
+    /// What's stopping gestures from working, if anything. Mission Control needs
+    /// only the camera; the two swipes also need Accessibility, so a half-granted
+    /// setup says so rather than silently doing one of the three.
+    private func gestureNote() -> String? {
+        switch HandTracker.authorization {
+        case .authorized:
+            return Spaces.canSwitchDesktops ? nil
+                : "Mission Control only — desktop switching needs Accessibility"
+        case .denied, .restricted:
+            return "Camera access is off"
+        default:
+            return "Camera access hasn't been granted yet"
+        }
+    }
+
+    @objc private func toggleGestures() {
+        Prefs.gestures.toggle()
+        guard Prefs.gestures, HandTracker.authorization == .notDetermined else { return }
+        HandTracker.requestAccess { _ in }
+    }
+
     @objc private func toggleModel() { Prefs.useModel.toggle() }
     @objc private func toggleAnswerQuestions() { Prefs.answerQuestions.toggle() }
     @objc private func useFahrenheit() { Prefs.useCelsius = false }
@@ -423,7 +527,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let window = MonitorWindow()
             window.onVisibilityChange = { [weak self] visible in
                 self?.engine.wantsLevels = visible
+                self?.engine.wantsPreview(visible)
             }
+            window.onCameraCheck = { [weak self] on in self?.engine.setCameraCheck(on) }
             monitor = window
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -454,6 +560,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openMicSettings() { openSettings("Privacy_Microphone") }
     @objc private func openSpeechSettings() { openSettings("Privacy_SpeechRecognition") }
+    @objc private func openCameraSettings() { openSettings("Privacy_Camera") }
+    /// Asks for Accessibility, rather than just pointing at where it lives.
+    ///
+    /// `AXIsProcessTrusted` — what `Spaces.canSwitchDesktops` reads — deliberately
+    /// never prompts, and an app that only ever reads it never appears in the
+    /// Accessibility list at all. Opening the pane would have left you hunting
+    /// for the + button and the bundle by hand. Asking *with* the prompt puts
+    /// Jarvis in the list and hands you the switch to flick.
+    @objc private func openAccessibilitySettings() {
+        let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        guard !AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary) else { return }
+        // The prompt carries its own "Open System Settings" button, so there is
+        // nothing more to do here — opening the pane as well would only put a
+        // window behind the dialog asking about the same thing.
+    }
 
     private func openSettings(_ anchor: String) {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!
