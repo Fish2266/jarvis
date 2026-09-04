@@ -37,6 +37,12 @@ final class ClapDetector {
     var config: ClapConfig = Sensitivity.medium.config
 
     private let frameSize = 256
+    /// How many samples pass between level reports — eight frames of 256.
+    ///
+    /// Published because the HUD draws from these: the reticle's dot is only
+    /// told the level this often, so it has to know how long it is being asked
+    /// to cover before the next one arrives.
+    static let samplesPerLevelReport = 256 * 8
     private var frame: [Float]
     private var frameFill = 0
     private var prevSample: Float = 0
@@ -114,7 +120,7 @@ final class ClapDetector {
         background = max(background, 1e-5)
 
         levelTick += 1
-        if levelTick >= 8 {                      // ~24 Hz, enough for the meter
+        if levelTick >= Self.samplesPerLevelReport / frameSize {   // ~23 Hz
             levelTick = 0
             onLevel?(rms, background)
         }

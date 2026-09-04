@@ -12,6 +12,7 @@ enum ActionKind: String, Codable, CaseIterable {
     case weather, forecast
     case reminder, reminders, agenda
     case timer, volume, media
+    case window, awake, clipboard
     case lock, sleep
 
     var title: String {
@@ -27,6 +28,9 @@ enum ActionKind: String, Codable, CaseIterable {
         case .timer:     return "Set a timer"
         case .volume:    return "Change the volume"
         case .media:     return "Play, pause or skip"
+        case .window:    return "Move the front window"
+        case .awake:     return "Keep the Mac awake"
+        case .clipboard: return "Copy what you say"
         case .lock:      return "Lock the screen"
         case .sleep:     return "Put the Mac to sleep"
         }
@@ -40,7 +44,7 @@ enum ActionKind: String, Codable, CaseIterable {
     /// deliberately isn't one: "cancel the timer" has nothing after it to
     /// capture, and splitting timers across two mechanisms to get that would
     /// be two places to look when one of them is wrong.
-    var capturesText: Bool { self == .reminder || self == .search }
+    var capturesText: Bool { self == .reminder || self == .search || self == .clipboard }
 
     /// Kinds that must match a phrase almost exactly rather than by containment.
     ///
@@ -65,8 +69,11 @@ enum ActionKind: String, Codable, CaseIterable {
     /// the other.
     var handlesOwnReply: Bool {
         switch self {
-        case .sleep, .lock, .timer, .volume, .media, .reminders, .agenda: return true
-        case .app, .url, .search, .weather, .forecast, .reminder: return false
+        case .sleep, .lock, .timer, .volume, .media, .reminders, .agenda,
+             .window, .awake, .clipboard:
+            return true
+        case .app, .url, .search, .weather, .forecast, .reminder:
+            return false
         }
     }
 
@@ -75,7 +82,12 @@ enum ActionKind: String, Codable, CaseIterable {
     /// "turn it up", "next track" and "cancel the timer" are all one command
     /// each with the detail buried in the words, so the action is handed what
     /// you actually said and works it out.
-    var readsSentence: Bool { self == .timer || self == .volume || self == .media }
+    var readsSentence: Bool {
+        switch self {
+        case .timer, .volume, .media, .window, .awake: return true
+        default: return false
+        }
+    }
 
     /// Kinds with a window that "bring it over" could move to this desktop.
     /// The rest ignore the request and just do their usual thing, so "gimme
@@ -129,6 +141,9 @@ struct Macro: Codable, Equatable, Identifiable {
         case .timer:     return "Timer"
         case .volume:    return "Volume"
         case .media:     return "Playback"
+        case .window:    return "Moving the window"
+        case .awake:     return "Staying awake"
+        case .clipboard: return "Copying"
         case .lock:      return "Locking up"
         case .sleep:     return "Going to sleep"
         }
@@ -149,6 +164,9 @@ struct Macro: Codable, Equatable, Identifiable {
         case .timer:     return "One at a time"
         case .volume:    return "Up, down, mute, or a number"
         case .media:     return "Whatever is playing"
+        case .window:    return "Halves, corners, full screen"
+        case .awake:     return "For a while, or until you say"
+        case .clipboard: return "Straight to the clipboard"
         case .lock:      return "Lock only — never shut down or restart"
         case .sleep:     return "Sleep only — never shut down or restart"
         }
@@ -220,13 +238,27 @@ extension Macro {
                         "google for", "search google for", "web search for",
                         "do a search for"],
               kind: .search, target: "https://www.google.com/search?q="),
-        // Deliberately not "how much time is left": that is one word away from
-        // "how much space is left", close enough for the fuzzy matcher to fire
-        // the timer at a question about the disk.
+        // Two phrases are deliberately absent, and both were bugs first.
+        //
+        // A bare "timer" is one typo from "time", and the coverage count gives
+        // a single-word phrase full marks for a single fuzzy word — so *every
+        // sentence containing "time"* fired the timer, "what time is it"
+        // included, and the clock stopped answering. "The timer" is safe
+        // because the second word has to be there too.
+        //
+        // "How much time is left" is one word from "how much space is left",
+        // which is a question about the disk.
+        // "Timer for ten minutes" is deliberately not here, and it is the one
+        // phrasing that had to be given up. "Timer for" and "time for" are a
+        // single character apart, so it fired on "time for a break" — and a
+        // command that eats an ordinary sentence is worse than one that asks
+        // for a slightly fuller phrasing. Say "set a timer for ten minutes",
+        // or put the unit in front: "a ten minute timer".
         Macro(name: "Timer",
-              phrases: ["timer", "set a timer", "start a timer", "cancel the timer",
-                        "stop the timer", "how long is left", "how long on the timer",
-                        "time left on the timer"],
+              phrases: ["set a timer", "start a timer", "cancel the timer",
+                        "stop the timer", "how long is left",
+                        "how long on the timer", "time left on the timer",
+                        "minute timer", "second timer", "hour timer"],
               kind: .timer, target: ""),
         Macro(name: "Volume",
               phrases: ["volume", "turn it up", "turn it down", "turn the volume up",
@@ -235,12 +267,19 @@ extension Macro {
               kind: .volume, target: ""),
         // Deliberately no bare "play": it is already a verb meaning "open", so
         // "play minecraft" has to keep opening Minecraft. It costs nothing,
-        // because the key macOS sends is a *toggle* — "pause" starts a paused
-        // track as readily as it stops a playing one.
+        // because the key macOS sends is a *toggle* — "pause it" starts a
+        // paused track as readily as it stops a playing one.
+        //
+        // Nor a bare "pause" or "skip", for a different reason: each is one
+        // typo from an ordinary word ("cause", "ship"), and the coverage count
+        // gives a one-word phrase full marks for a single fuzzy word — so
+        // "what's the cause of that" paused your music. Two words fixes it,
+        // because the second has to be there as well.
         Macro(name: "Playback",
-              phrases: ["pause", "resume", "unpause", "play pause", "pause the music",
-                        "next track", "previous track", "next song", "previous song",
-                        "skip", "skip this", "skip the song", "last song"],
+              phrases: ["pause it", "pause the music", "pause playback", "resume",
+                        "unpause", "play pause", "next track", "previous track",
+                        "next song", "previous song", "skip this", "skip the song",
+                        "skip ahead", "last song"],
               kind: .media, target: ""),
         // Every phrase says "tomorrow", and that is deliberate. The Weather
         // command already answers to "forecast", and two commands a hair apart
@@ -266,6 +305,33 @@ extension Macro {
               phrases: ["lock the screen", "lock it up", "lock up", "lock my mac",
                         "lock the mac", "lock screen"],
               kind: .lock, target: ""),
+        // Deliberately no bare "left" or "right" here, though the action
+        // understands both. Those two words turn up in far too many sentences
+        // to be a command on their own; the phrase has to say it is about a
+        // window, and the action then reads which way out of the whole thing.
+        Macro(name: "Window",
+              phrases: ["snap left", "snap right", "left half", "right half",
+                        "top half", "bottom half", "maximise", "maximize",
+                        "fill the screen", "centre the window", "center the window",
+                        "full screen", "move the window", "put it on the left",
+                        "put it on the right"],
+              kind: .window, target: ""),
+        // Nothing here is mostly the word "sleep". "Dont sleep" is ten
+        // characters of which five are "sleep", which was close enough to
+        // "do i sleep" that "how do i sleep better" asked the Mac to stay
+        // awake. The release phrases carry their own weight instead, and
+        // "stop"/"cancel" anywhere in a sentence that matched a hold phrase
+        // releases it too.
+        Macro(name: "Stay awake",
+              phrases: ["stay awake", "keep awake", "keep the mac awake",
+                        "caffeinate", "dont let the mac sleep",
+                        "stop staying awake", "stop keeping it awake",
+                        "you can let it sleep now"],
+              kind: .awake, target: ""),
+        Macro(name: "Copy",
+              phrases: ["copy that down", "copy this down", "note this down",
+                        "copy down", "remember this", "put this on the clipboard"],
+              kind: .clipboard, target: ""),
     ]
 }
 

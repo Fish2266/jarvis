@@ -70,6 +70,18 @@ enum HUD {
     /// which the readout renders as a dash rather than as "0.0 kHz".
     static var audioRate: Double = 0
 
+    /// How long the reticle has to cover before the next level arrives.
+    ///
+    /// Levels come from the clap detector every 2048 samples, so the interval
+    /// depends on the input's sample rate — 43 ms at 48 kHz, 46 at 44.1. The
+    /// dot animates over slightly more than that, so consecutive animations
+    /// overlap and the motion never has a gap to stutter across.
+    ///
+    /// Set by the listener, which is the one place that knows both numbers.
+    /// Kept here as a plain value rather than computed from `ClapDetector` so
+    /// that drawing code depends on nothing that listens.
+    static var levelInterval: TimeInterval = 1.0 / 23.0
+
     /// Turns a high-passed RMS into something to draw with, 0…1.
     ///
     /// The curve matters more than the scale. Speech is mostly quiet with brief
@@ -80,6 +92,25 @@ enum HUD {
     static func voiceScale(_ rms: Float) -> CGFloat {
         guard rms > 0 else { return 0 }
         return CGFloat(min(1, powf(min(1, rms / 0.05), 0.6)))
+    }
+
+    /// How quickly the reticle's dot follows a rise, and a fall.
+    ///
+    /// Asymmetric on purpose: a voice starting is worth showing promptly, a
+    /// voice stopping is not worth chasing down through every gap between
+    /// syllables. Neither is 1, which is what the first version used for a
+    /// rise — snapping to each frame tracked the noise in the signal rather
+    /// than the voice in it.
+    static let voiceAttack: CGFloat = 0.6
+    static let voiceRelease: CGFloat = 0.18
+
+    /// One step of the filter behind the dot.
+    ///
+    /// Pulled out of the view so it can be measured: `Tests/answers` runs a
+    /// synthetic speech envelope through it and checks the frame-to-frame
+    /// jerk actually falls.
+    static func smoothed(_ current: CGFloat, towards target: CGFloat) -> CGFloat {
+        current + (target - current) * (target > current ? voiceAttack : voiceRelease)
     }
 
     /// Applies contentsScale down the tree so vectors stay crisp on Retina.

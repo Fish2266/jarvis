@@ -254,8 +254,8 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
         case .url:       return "URL"
         case .search:    return "Engine"
         case .reminder:  return "List"
-        case .weather, .forecast, .reminders, .agenda,
-             .timer, .volume, .media, .lock, .sleep:
+        case .weather, .forecast, .reminders, .agenda, .timer, .volume,
+             .media, .window, .awake, .clipboard, .lock, .sleep:
             return ""
         }
     }
@@ -281,6 +281,19 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
             hint.stringValue = "Sends the media key to whatever is playing — Music, Spotify, "
                 + "a video in a tab. \"Pause\" is a toggle, so it starts a paused track too. "
                 + "Needs Accessibility, the same grant the desktop gestures use."
+        case .window:
+            hint.stringValue = "Moves the window in front of you: halves, quarters, "
+                + "maximised, centred, or full screen. The words decide which — \"snap "
+                + "left\", \"top right\", \"fill the screen\". Needs Accessibility, the "
+                + "same grant the desktop gestures use."
+        case .awake:
+            hint.stringValue = "Stops the Mac dozing off. Say a length to hold it for a "
+                + "while (\"stay awake for two hours\"), or nothing to hold it until you "
+                + "say \"let it sleep\". The assertion is released when Jarvis quits."
+        case .clipboard:
+            hint.stringValue = "Phrases here are prefixes — say the phrase, then whatever "
+                + "you want kept. It goes straight onto the clipboard, ready to paste. "
+                + "Ask \"what's on my clipboard\" to hear it back."
         case .reminders, .agenda:
             hint.stringValue = "Reads out what's there — the first few, then how many more. "
                 + "Read-only: no command in Jarvis can delete a reminder or change an event."
@@ -335,6 +348,9 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
             case .timer:     text = "Timer"
             case .volume:    text = "Volume"
             case .media:     text = "Playback"
+            case .window:    text = "Window"
+            case .awake:     text = "Stay awake"
+            case .clipboard: text = "Clipboard"
             case .lock:      text = "Lock"
             case .sleep:     text = "Sleep"
             }

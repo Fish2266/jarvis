@@ -55,6 +55,10 @@ enum Questions {
     static let imperatives = [
         "flip a", "flip me", "toss a", "toss me", "roll a", "roll me", "roll the",
         "roll two", "pick a", "pick me", "choose a", "give me a",
+        // Asking for the last line again is an order too, and one that has to
+        // reach the answer path or there is nowhere for it to go.
+        "say that", "say it", "say again", "repeat", "read my clipboard",
+        "read the clipboard", "come again", "one more time",
     ]
 
     /// Questions with an exact answer the Mac already knows.
@@ -119,7 +123,171 @@ enum Questions {
                            "what else can you do", "list my commands"]) {
             return capabilities(commands)
         }
+
+        if contains(text, ["whats on my clipboard", "what is on my clipboard",
+                           "whats in my clipboard", "read my clipboard",
+                           "read the clipboard", "whats copied", "what did i copy"]) {
+            return Clipboard.spokenSummary()
+        }
+
+        // The raw transcript, not the folded one: normalising turns "5:30"
+        // into "5 30", and the system date parser wants the colon.
+        if let countdown = untilAnswer(transcript, now: now) { return countdown }
         return nil
+    }
+
+    /// "say that again", "what was that", "repeat".
+    ///
+    /// Handled by the caller rather than here, because the thing to repeat is
+    /// the *engine's* last answer — this only recognises the request.
+    static func isRepeatRequest(_ transcript: String) -> Bool {
+        var text = PhraseMatcher.normalize(transcript)
+        for name in Resolver.assistantNames
+        where text == name || text.hasPrefix(name + " ") {
+            text = String(text.dropFirst(name.count)).trimmingCharacters(in: .whitespaces)
+            break
+        }
+        for tail in [" please", " for me"] where text.hasSuffix(tail) {
+            text = String(text.dropLast(tail.count))
+        }
+        // Whole sentence, not containment. "What did you say about the weather"
+        // is a question about the weather, and repeating the last answer to it
+        // would be answering something nobody asked.
+        let asks: Set<String> = ["say that again", "say it again", "repeat that",
+                                 "repeat it", "repeat", "what was that",
+                                 "what did you say", "come again", "say again",
+                                 "one more time", "again"]
+        return asks.contains(text)
+    }
+
+    // MARK: - How long until something
+
+    /// Built once. `NSDataDetector` compiles a good deal of machinery on
+    /// creation and has no state to carry between uses.
+    private static let dateDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.date.rawValue)
+
+    /// Every opener contains "until", "till" or "til", which is what the tail
+    /// is split on. "How long to" is deliberately absent: "how long to boil an
+    /// egg" is not a countdown, and there is no safe way to split on "to" —
+    /// the word turns up inside "october".
+    private static let untilAsks = [
+        "how long until", "how long till", "how long til",
+        "how many days until", "how many days till", "how many hours until",
+        "how many minutes until", "how many weeks until", "how long is it until",
+        "time until", "days until", "how many sleeps until",
+    ]
+
+    /// Holidays the system date parser has never heard of.
+    ///
+    /// Small and fixed-date on purpose. Easter moves, and computing it needs
+    /// the whole computus; anything that needs a rule rather than a date can go
+    /// to the model, which is fine at exactly that.
+    private static let fixedHolidays: [String: (month: Int, day: Int)] = [
+        "christmas": (12, 25), "christmas day": (12, 25), "xmas": (12, 25),
+        "christmas eve": (12, 24), "boxing day": (12, 26),
+        "new year": (1, 1), "new years": (1, 1), "new years day": (1, 1),
+        "the new year": (1, 1), "new years eve": (12, 31),
+        "halloween": (10, 31), "valentines": (2, 14), "valentines day": (2, 14),
+        "independence day": (7, 4), "fourth of july": (7, 4), "july fourth": (7, 4),
+        "april fools": (4, 1), "april fools day": (4, 1),
+        "st patricks day": (3, 17), "saint patricks day": (3, 17),
+        "guy fawkes": (11, 5), "bonfire night": (11, 5),
+    ]
+
+    /// The next time that month and day comes round, at midnight.
+    private static func nextOccurrence(month: Int, day: Int, after now: Date) -> Date? {
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: now)
+        var components = DateComponents(year: year, month: month, day: day)
+        guard let thisYear = calendar.date(from: components) else { return nil }
+        if thisYear > now { return thisYear }
+        components.year = year + 1
+        return calendar.date(from: components)
+    }
+
+    /// "how long until Friday", "how many days until December 25".
+    ///
+    /// The date comes from the same system parser reminders use, so anything
+    /// that works there works here — weekdays, "tomorrow", "next Monday", a
+    /// date, a time today. It is gated behind the opener, so an ordinary
+    /// question never pays for the detector.
+    static func untilAnswer(_ transcript: String, now: Date) -> String? {
+        guard contains(PhraseMatcher.normalize(transcript), untilAsks) else { return nil }
+
+        // Everything after the last "until", and this is the whole bug that was
+        // here before. Handed the opener as well, `NSDataDetector` swallows the
+        // word itself and answers with *today* at four in the afternoon — so
+        // "how many days until December 25" came back as an hour and a half.
+        // It matched, it returned a date, and the date was nonsense.
+        //
+        // Split on the raw string rather than the folded one: folding turns
+        // "5:30" into "5 30", and the parser wants the colon it threw away.
+        guard let tail = tailAfterUntil(transcript) else { return nil }
+
+        guard let target = holiday(in: tail, now: now) ?? parsedDate(in: tail, now: now)
+        else { return nil }
+
+        let seconds = target.timeIntervalSince(now)
+        guard abs(seconds) < 60 * 60 * 24 * 400 else { return nil }
+        if seconds <= 0 {
+            return "That was \(SystemInfo.duration(Int(-seconds / 60))) ago, sir."
+        }
+        // More than a day off is counted in *calendar* days rather than
+        // 24-hour blocks, because that is what the question means: on the 4th,
+        // Christmas is 112 sleeps away whatever time of day you ask.
+        if seconds >= 86400 {
+            let calendar = Calendar.current
+            let days = calendar.dateComponents([.day],
+                                               from: calendar.startOfDay(for: now),
+                                               to: calendar.startOfDay(for: target)).day ?? 0
+            return "\(days) day\(days == 1 ? "" : "s"), sir."
+        }
+        // Under a minute rounds to zero, and "no time, sir" is not an answer.
+        guard seconds >= 60 else { return "Less than a minute, sir." }
+        return "\(SystemInfo.duration(Int(seconds / 60))), sir."
+    }
+
+    /// What comes after the last "until" / "till" / "til", whole word.
+    private static func tailAfterUntil(_ transcript: String) -> String? {
+        var best: Range<String.Index>?
+        for word in ["until", "till", "til"] {
+            var search = transcript.startIndex..<transcript.endIndex
+            while let found = transcript.range(of: word, options: [.caseInsensitive], range: search) {
+                let beforeOK = found.lowerBound == transcript.startIndex
+                    || !transcript[transcript.index(before: found.lowerBound)].isLetter
+                let afterOK = found.upperBound == transcript.endIndex
+                    || !transcript[found.upperBound].isLetter
+                if beforeOK, afterOK, best.map({ found.upperBound > $0.upperBound }) ?? true {
+                    best = found
+                }
+                guard found.upperBound < transcript.endIndex else { break }
+                search = found.upperBound..<transcript.endIndex
+            }
+        }
+        guard let best else { return nil }
+        let tail = String(transcript[best.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return tail.isEmpty ? nil : tail
+    }
+
+    private static func holiday(in tail: String, now: Date) -> Date? {
+        var name = PhraseMatcher.normalize(tail)
+        for filler in ["the ", "next "] where name.hasPrefix(filler) {
+            name = String(name.dropFirst(filler.count))
+        }
+        guard let (month, day) = fixedHolidays[name] else { return nil }
+        return nextOccurrence(month: month, day: day, after: now)
+    }
+
+    private static func parsedDate(in tail: String, now: Date) -> Date? {
+        guard let detector = dateDetector else { return nil }
+        let range = NSRange(tail.startIndex..., in: tail)
+        let dates = detector.matches(in: tail, options: [], range: range).compactMap(\.date)
+        // The soonest one still ahead of us, or failing that the last named —
+        // "how long until Friday" said on a Friday should say something rather
+        // than nothing.
+        return dates.filter { $0 > now }.min() ?? dates.last
     }
 
     /// Answers that are exact but not instant, so they must not run on the main

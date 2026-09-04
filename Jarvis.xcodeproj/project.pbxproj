@@ -128,6 +128,7 @@
 		AA0000000000000000000051 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = jarvis_icon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -135,6 +136,7 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Jarvis asks Google Chrome whether a page is already open, so it can switch to that tab instead of opening another copy.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Jarvis reads out what is on your calendar today when you ask. It never adds, changes or deletes an event.";
@@ -156,6 +158,7 @@
 		AA0000000000000000000052 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = jarvis_icon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -163,6 +166,7 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Jarvis asks Google Chrome whether a page is already open, so it can switch to that tab instead of opening another copy.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Jarvis reads out what is on your calendar today when you ask. It never adds, changes or deletes an event.";

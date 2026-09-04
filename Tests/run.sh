@@ -57,7 +57,8 @@ swiftc -O $T -o "$OUT/questions" \
     Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
     Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
     Jarvis/Questions.swift Jarvis/Intelligence.swift Jarvis/Calc.swift \
-    Jarvis/SystemInfo.swift Jarvis/Agenda.swift Tests/questions/main.swift
+    Jarvis/SystemInfo.swift Jarvis/Agenda.swift Jarvis/Clipboard.swift \
+    Tests/questions/main.swift
 "$OUT/questions"
 
 echo
@@ -135,5 +136,6 @@ swiftc -O $T -o "$OUT/answers" \
     Jarvis/WebSearch.swift Jarvis/SystemInfo.swift Jarvis/Agenda.swift \
     Jarvis/Questions.swift Jarvis/Resolver.swift Jarvis/Macro.swift \
     Jarvis/AppIndex.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
-    Jarvis/HUDStyle.swift Tests/answers/main.swift
+    Jarvis/HUDStyle.swift Jarvis/Clipboard.swift Jarvis/KeepAwake.swift \
+    Jarvis/WindowManager.swift Tests/answers/main.swift
 "$OUT/answers"

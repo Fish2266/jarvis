@@ -94,6 +94,7 @@ enum Prefs {
         static let answerQuestions = "answerQuestions"
         static let gestures = "handGestures"
         static let trigger = "triggerShortcut"
+        static let dim = "dimScreen"
     }
 
     static func registerDefaults() {
@@ -111,6 +112,7 @@ enum Prefs {
             Key.gestures: true,
             Key.trigger: TriggerShortcut.commandJ.rawValue,
             Key.reverb: 0,
+            Key.dim: true,
         ])
     }
 
@@ -198,6 +200,16 @@ enum Prefs {
     static var triggerShortcut: TriggerShortcut {
         get { TriggerShortcut(rawValue: d.integer(forKey: Key.trigger)) ?? .commandJ }
         set { d.set(newValue.rawValue, forKey: Key.trigger) }
+    }
+
+    /// Darken the desktop behind the reticle.
+    ///
+    /// On by default, because the cyan is hard to read over a bright window.
+    /// Off for anyone who would rather keep looking at their work while they
+    /// talk — the one part of the HUD that covers anything.
+    static var dimScreen: Bool {
+        get { d.bool(forKey: Key.dim) }
+        set { d.set(newValue, forKey: Key.dim) }
     }
 
     static var useCelsius: Bool {

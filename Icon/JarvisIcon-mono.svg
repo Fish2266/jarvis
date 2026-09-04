@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Jarvis</title>
+  <desc>Two palms mid-clap with the core lit between them.</desc>
+
+  <!-- Back layer: the two palms. Mirrored annulus sectors with round caps. -->
+  <g id="Palms" fill="#1FC8EC">
+    <path d="M330.9 191.0 A432.0 432.0 0 0 0 330.9 833.0 A73.0 73.0 0 0 0 428.6 724.5 A286.0 286.0 0 0 1 428.6 299.5 A73.0 73.0 0 0 0 330.9 191.0 Z"/>
+    <path d="M693.1 833.0 A432.0 432.0 0 0 0 693.1 191.0 A73.0 73.0 0 0 0 595.4 299.5 A286.0 286.0 0 0 1 595.4 724.5 A73.0 73.0 0 0 0 693.1 833.0 Z"/>
+  </g>
+
+  <!-- Front layer: the core. Sits proud so the specular pass catches it. -->
+  <g id="Core" fill="#FFFFFF">
+    <path d="M412.0 512.0 A100.0 100.0 0 1 0 612.0 512.0 A100.0 100.0 0 1 0 412.0 512.0 Z"/>
+  </g>
+</svg>

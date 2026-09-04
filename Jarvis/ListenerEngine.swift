@@ -55,6 +55,9 @@ final class ListenerEngine {
     /// which is the whole reason it isn't simply always on.
     private var hudLevels = false
     var onLog: ((String) -> Void)?
+    /// Fired with the action's own label each time a command actually runs —
+    /// "Opening Chrome", "Left half" — so the menu can list the last few.
+    var onAction: ((String) -> Void)?
     var onTranscript: ((String) -> Void)?
     /// Set only while the Clap Monitor is on screen, same bargain as `wantsLevels`.
     var onPreview: ((CGImage?, [CameraPreviewView.Hand], String) -> Void)?
@@ -98,6 +101,12 @@ final class ListenerEngine {
     /// there was more than half of what it cost.
     private var catalog: Resolver.Catalog
     private var lastHeard = ""
+    /// The last exact line Jarvis said, for "say that again".
+    ///
+    /// Facts only. A generated confirmation is not worth repeating — "Right
+    /// away, sir" tells you nothing the second time — and those take a
+    /// different path out, so they never land here.
+    private var lastAnswer = ""
     /// Fires once dictation has stopped changing, for commands that capture text.
     private var settleWork: DispatchWorkItem?
     /// How long the transcript must hold still before a dictated command runs.
@@ -382,8 +391,12 @@ final class ListenerEngine {
         do {
             try engine.start()
             // So the HUD's corner readout can say the real rate rather than a
-            // hard-coded one that happens to be wrong on half the Macs there are.
+            // hard-coded one that happens to be wrong on half the Macs there are
+            // — and so the reticle's dot knows how long it has to cover between
+            // one level and the next.
             HUD.audioRate = format.sampleRate
+            HUD.levelInterval =
+                Double(ClapDetector.samplesPerLevelReport) / format.sampleRate
             state = .listening
             log("listening on \(inputDeviceName()) @ \(Int(format.sampleRate)) Hz")
         } catch {
@@ -568,6 +581,16 @@ final class ListenerEngine {
         log("question: \"\(question)\"")
         if Prefs.showHUD { HUDOverlay.shared.confirm(headline: "Thinking…") }
 
+        // "Say that again" is answered from what was already said, so it
+        // survives a model that has since been switched off and never spends a
+        // second thinking about a line it wrote a moment ago.
+        if Questions.isRepeatRequest(question) {
+            deliverAnswer(lastAnswer.isEmpty
+                          ? "I've not said anything worth repeating yet, sir."
+                          : lastAnswer, id: id)
+            return
+        }
+
         // Some questions have an exact answer already — no need to ask, and no
         // chance of the model inventing one.
         let names = macros.filter(\.enabled).map(\.name)
@@ -607,6 +630,7 @@ final class ListenerEngine {
     /// model — has to leave the engine in exactly the same condition.
     private func deliverAnswer(_ text: String, id: Int) {
         guard id == runID else { return }
+        lastAnswer = text
         if Prefs.showHUD { HUDOverlay.shared.setAnswer(text) }
         if Prefs.speakReply { VoiceBox.shared.speak(text) }
         state = engine.isRunning ? .listening : .off
@@ -909,6 +933,7 @@ final class ListenerEngine {
         log(String(format: "%@ (%.2f via %@)", label,
                    resolution.confidence, resolution.source.rawValue))
 
+        onAction?(label)
         if Prefs.showHUD { HUDOverlay.shared.confirm(headline: label) }
 
         // The action runs now. Everything below this line is decoration.
@@ -1017,7 +1042,7 @@ final class ListenerEngine {
                     }
                 } else {
                     self?.log("bad URL for \(macro.name): \(macro.target)")
-                    if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open \(macro.name)") }
+                    if Prefs.showHUD { HUDOverlay.shared.fail("Couldn't open \(macro.name)") }
                 }
                 completion(nil)
             }
@@ -1055,7 +1080,7 @@ final class ListenerEngine {
                     self?.ifCurrent(id) {
                         if Prefs.showHUD {
                             HUDOverlay.shared.setHeadline("Couldn't add that reminder")
-                            HUDOverlay.shared.setDetail(error.localizedDescription)
+                            HUDOverlay.shared.fail(error.localizedDescription)
                         }
                     }
                     completion(nil)
@@ -1094,7 +1119,7 @@ final class ListenerEngine {
                     self?.ifCurrent(id) {
                         if Prefs.showHUD {
                             HUDOverlay.shared.setHeadline("Weather unavailable")
-                            HUDOverlay.shared.setDetail(error.localizedDescription)
+                            HUDOverlay.shared.fail(error.localizedDescription)
                         }
                     }
                     completion(nil)
@@ -1106,7 +1131,7 @@ final class ListenerEngine {
             else {
                 log("nothing to search for")
                 ifCurrent(id) {
-                    if Prefs.showHUD { HUDOverlay.shared.setDetail("Nothing to search for") }
+                    if Prefs.showHUD { HUDOverlay.shared.fail("Nothing to search for") }
                 }
                 completion(nil)
                 return
@@ -1125,7 +1150,7 @@ final class ListenerEngine {
             } else {
                 log("couldn't open the search")
                 ifCurrent(id) {
-                    if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open the search") }
+                    if Prefs.showHUD { HUDOverlay.shared.fail("Couldn't open the search") }
                 }
             }
             completion(nil)
@@ -1155,7 +1180,7 @@ final class ListenerEngine {
             let change = SystemAudio.change(for: heard) ?? .report
             guard let line = SystemAudio.apply(change) else {
                 log("this output has no volume control Jarvis can reach")
-                announce("I can't reach this output's volume, sir.", id: id)
+                announceFailure("I can't reach this output's volume, sir.", id: id)
                 completion(nil)
                 return
             }
@@ -1166,7 +1191,7 @@ final class ListenerEngine {
         case .media:
             guard MediaKeys.available else {
                 log("playback keys need Accessibility")
-                announce("I need Accessibility for that, sir.", id: id)
+                announceFailure("I need Accessibility for that, sir.", id: id)
                 completion(nil)
                 return
             }
@@ -1179,8 +1204,46 @@ final class ListenerEngine {
                 announce(transport.spoken, id: id)
             } else {
                 log("couldn't send the playback key")
-                announce("That didn't get through, sir.", id: id)
+                announceFailure("That didn't get through, sir.", id: id)
             }
+            completion(nil)
+
+        case .window:
+            guard let wanted = WindowManager.placement(for: heard) else {
+                // Maximising on a shrug is a big, surprising change to make
+                // when the sentence never said where to put it.
+                announce("Where to, sir? Left, right, a corner, or full screen.", id: id)
+                completion(nil)
+                return
+            }
+            if let failure = WindowManager.apply(wanted) {
+                log("window: \(failure)")
+                announceFailure(failure.spoken, id: id)
+            } else {
+                log("window: \(wanted.label)")
+                ifCurrent(id) {
+                    if Prefs.showHUD { HUDOverlay.shared.setHeadline(wanted.label) }
+                }
+                announce(wanted.spoken, id: id)
+            }
+            completion(nil)
+
+        case .awake:
+            runKeepAwake(heard: heard, id: id)
+            completion(nil)
+
+        case .clipboard:
+            guard let text = payload, Clipboard.copy(text) else {
+                log("nothing to copy")
+                announceFailure("There was nothing to copy, sir.", id: id)
+                completion(nil)
+                return
+            }
+            log("copied \(text.count) characters")
+            ifCurrent(id) {
+                if Prefs.showHUD { HUDOverlay.shared.setHeadline(Clipboard.headline(for: text)) }
+            }
+            announce("On the clipboard, sir.", id: id)
             completion(nil)
 
         case .lock:
@@ -1208,11 +1271,27 @@ final class ListenerEngine {
     /// rather than an answer.
     private func announce(_ line: String, id: Int, asAnswer: Bool = false) {
         ifCurrent(id) {
+            // Every exact line is worth repeating — "five minutes left" and
+            // "volume at forty percent" are facts you might well have missed.
+            // The model's flavour lines are not: those go through `deliver`,
+            // which records nothing, so "say that again" never comes back with
+            // "Right away, sir".
+            self.lastAnswer = line
             if Prefs.showHUD {
                 // The strip first, then the voice: the strip is what the
                 // envelope attaches to, and it has to be up to catch it.
                 asAnswer ? HUDOverlay.shared.setAnswer(line) : HUDOverlay.shared.setDetail(line)
             }
+            if Prefs.speakReply { VoiceBox.shared.speak(line) }
+        }
+    }
+
+    /// A command that ran and couldn't. Same shape as `announce`, but the
+    /// reticle turns amber rather than leaving a gold "ACCESS GRANTED" over the
+    /// top of an apology.
+    private func announceFailure(_ line: String, id: Int) {
+        ifCurrent(id) {
+            if Prefs.showHUD { HUDOverlay.shared.fail(line) }
             if Prefs.speakReply { VoiceBox.shared.speak(line) }
         }
     }
@@ -1228,7 +1307,7 @@ final class ListenerEngine {
             ifCurrent(id) {
                 if Prefs.showHUD {
                     HUDOverlay.shared.setHeadline("Couldn't read your \(what)")
-                    HUDOverlay.shared.setDetail(error.localizedDescription)
+                    HUDOverlay.shared.fail(error.localizedDescription)
                 }
             }
         }
@@ -1278,11 +1357,42 @@ final class ListenerEngine {
         }
     }
 
+    /// Holding the Mac awake, letting it go, or saying how long is left.
+    private func runKeepAwake(heard: String, id: Int) {
+        switch KeepAwake.intent(in: heard) {
+        case .hold(let seconds):
+            guard KeepAwake.shared.start(for: seconds) else {
+                log("couldn't take the power assertion")
+                announceFailure("I couldn't keep it awake, sir.", id: id)
+                return
+            }
+            let how = KeepAwake.describe(KeepAwake.shared.until)
+            log("staying awake \(how)")
+            ifCurrent(id) {
+                if Prefs.showHUD { HUDOverlay.shared.setHeadline("Awake · \(how)") }
+            }
+            announce("Keeping it awake \(how), sir.", id: id)
+
+        case .release:
+            let had = KeepAwake.shared.stop()
+            log(had ? "letting it sleep again" : "wasn't holding it awake")
+            announce(had ? "It can sleep again, sir." : "I wasn't holding it awake, sir.",
+                     id: id)
+
+        case .report:
+            guard KeepAwake.shared.isActive else {
+                announce("Not holding it awake, sir.", id: id)
+                return
+            }
+            announce("Awake \(KeepAwake.describe(KeepAwake.shared.until)), sir.", id: id)
+        }
+    }
+
     /// "quit chrome". Polite, and never itself.
     private func quitApp(_ macro: Macro, completion: @escaping (String?) -> Void) {
         guard let running = Spaces.runningApp(atPath: macro.target) else {
             log("\(macro.name) isn't running")
-            if Prefs.showHUD { HUDOverlay.shared.setDetail("\(macro.name) isn't running") }
+            if Prefs.showHUD { HUDOverlay.shared.fail("\(macro.name) isn't running") }
             completion(nil)
             return
         }
@@ -1290,7 +1400,7 @@ final class ListenerEngine {
         // back, which is a bad enough outcome to be worth one comparison.
         guard running.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
             log("declining to quit myself")
-            if Prefs.showHUD { HUDOverlay.shared.setDetail("I'd rather not, sir") }
+            if Prefs.showHUD { HUDOverlay.shared.fail("I'd rather not, sir") }
             completion(nil)
             return
         }
@@ -1301,7 +1411,7 @@ final class ListenerEngine {
             completion(nil)
         } else {
             log("\(macro.name) refused to quit")
-            if Prefs.showHUD { HUDOverlay.shared.setDetail("\(macro.name) wouldn't quit") }
+            if Prefs.showHUD { HUDOverlay.shared.fail("\(macro.name) wouldn't quit") }
             completion(nil)
         }
     }
@@ -1326,7 +1436,7 @@ final class ListenerEngine {
                 if let error {
                     self?.log("couldn't open \(macro.name): \(error.localizedDescription)")
                     self?.ifCurrent(id) {
-                        if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open \(macro.name)") }
+                        if Prefs.showHUD { HUDOverlay.shared.fail("Couldn't open \(macro.name)") }
                     }
                 }
                 completion(nil)

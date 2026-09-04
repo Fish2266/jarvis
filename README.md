@@ -1,6 +1,6 @@
 # Jarvis
 
-A menu-bar app that listens for **two claps**, then does what you tell it. Opens apps and websites, searches the web, sets timers, works the volume and the music, reads back your day, reports the weather — and answers in JARVIS's voice using Apple's on-device model.
+A menu-bar app that listens for **two claps**, then does what you tell it. Opens apps and websites, searches the web, sets timers, moves windows, works the volume and the music, keeps the Mac awake, reads back your day, reports the weather — and answers in JARVIS's voice using Apple's on-device model.
 
 The mic is only transcribed for a few seconds after a clap. Nothing is listened to the rest of the time.
 
@@ -12,7 +12,7 @@ cd ~/Desktop/jarvis && ./install.sh
 
 Or open `Jarvis.xcodeproj` and hit Run. No Dock icon — look for the clap icon in the menu bar.
 
-macOS will ask for **Microphone** and **Speech Recognition** up front, then **Location** (weather), **Reminders**, **Calendar** (reading your day back), and **Automation → Chrome** (reusing an open tab) the first time each is needed. **Accessibility** is optional and covers two things: the desktop-switching gestures and the playback keys. Requires macOS 26 for Apple Intelligence.
+macOS will ask for **Microphone** and **Speech Recognition** up front, then **Location** (weather), **Reminders**, **Calendar** (reading your day back), and **Automation → Chrome** (reusing an open tab) the first time each is needed. **Accessibility** is optional and covers three things: the desktop-switching gestures, the playback keys, and moving windows. The menu names whichever of them is actually going without. Requires macOS 26 for Apple Intelligence.
 
 ## Using it
 
@@ -44,6 +44,9 @@ clap clap  "next track"                -> skips whatever is playing
 clap clap  "search for how to poach an egg"
 clap clap  "what's on my calendar"     -> read out loud
 clap clap  "what's fifteen percent of two hundred and forty"
+clap clap  "snap left"                 -> the front window takes the left half
+clap clap  "stay awake for two hours"
+clap clap  "copy that down 0 7 1 double 4 double 6"
 clap clap  "lock the screen"
 ```
 
@@ -186,7 +189,7 @@ The menu shows what is missing, and **Hand gestures after a double clap** turns 
 
 - **Name** — what the HUD says. "Minecraft" becomes "Opening Minecraft".
 - **Says** — comma-separated phrases. Either a bare target (`the craft`) that pairs with any verb, or a whole catchphrase (`wake up daddy's home`) you say on its own.
-- **Action** — thirteen of them: open an app, open a website, search the web, report the weather, report tomorrow's forecast, add a reminder, read out your reminders, read out your calendar, set a timer, change the volume, play/pause or skip, lock the screen, put the Mac to sleep.
+- **Action** — sixteen of them: open an app, open a website, search the web, report the weather, report tomorrow's forecast, add a reminder, read out your reminders, read out your calendar, set a timer, change the volume, play/pause or skip, move the front window, keep the Mac awake, copy what you say, lock the screen, put the Mac to sleep.
 - **Profile** — for websites and searches, which Chrome profile to open in. Reads your real profiles out of Chrome, so it lists them by the names you gave them.
 - **Target** — an app (there's a **Choose…** picker), a URL, a search engine, or a Reminders list. The actions that need nothing hide the box entirely.
 
@@ -212,6 +215,34 @@ New built-in commands reach an existing installation too. Your saved commands
 are never re-seeded, so anything added in a later version is offered once,
 skipped if you already have one by that name, and never brought back if you
 delete it.
+
+### A phrase of one short word will bite you
+
+Worth knowing before you write one, because it cost three bugs to learn.
+
+Matching allows **one typo per word of four letters or more**, and a phrase of a
+single word gets full marks for a single fuzzy match. So a one-word phrase fires
+on every sentence containing any word one edit away from it — and English has a
+lot of those.
+
+`timer` shipped as a phrase, and `time` is one edit from it. Every sentence with
+the word "time" in it became a timer, "what time is it" included, and the clock
+quietly stopped answering. `pause` did the same through "cause", `skip` through
+"ship", and a "stay awake" phrase of `dont sleep` was close enough to "do i
+sleep" that *"how do i sleep better"* asked the Mac to stay up.
+
+Two words fixes all of it, because the second one has to be there as well: "set
+a timer", "pause it", "skip this". The built-ins are held to that by a test, with
+one deliberate exception — "mute", whose neighbours are "mate", "mule" and
+"muse", none of which turn up in a sentence you would say to a computer.
+
+The lesson only applies to *short* words. "Chrome", "Netflix" and "caffeinate"
+have empty neighbourhoods and are perfectly good on their own.
+
+**This is not the same as containment**, which is deliberate and unchanged: a
+command called Drive really is meant to open when you say "drive", so "how do I
+drive to work" opens Google Drive. That is the resolver doing its job. A *typo*
+match is different — there the word was never said at all.
 
 ## Putting the Mac to sleep
 
@@ -367,6 +398,77 @@ Deliberately no "shut down" or "power off" in the verb list: those belong to the
 sentence about the *Mac*, and the one thing worse than a command that doesn't
 work is one that works on the wrong noun.
 
+## Moving windows
+
+```
+"snap left"        "right half"       "top half"      "bottom half"
+"top left"         "bottom right"     "upper right"   "lower left"
+"maximize"         "fill the screen"  "full screen"   "centre the window"
+```
+
+Moves the window you are looking at — the frontmost app's focused one. Halves,
+quarters, the whole visible screen, or full screen proper. Centring keeps the
+window's own size and just puts it in the middle.
+
+The only way to move another application's window is the accessibility API, so
+this needs the **same grant the desktop-switching gestures do**, and says so when
+it hasn't got it. Three details that are not obvious and were each wrong once:
+
+- **Position, then size, then position again.** Not superstition. A window with
+  a minimum size clamps the size it is given, and one crossing displays clamps
+  the position, so a single pass leaves it somewhere neither asked for.
+- **A full-screen window ignores every position it is given**, so it is taken
+  out of full screen first — otherwise "put it on the left" looked like the
+  command doing nothing at all.
+- **Two coordinate systems.** AppKit measures from the bottom left of the
+  primary display with y going up; accessibility measures from the top left with
+  y going down. One subtraction converts between them, and the height to
+  subtract from is always the *primary* display's, however many are attached.
+
+Every request is bounded by a **half-second messaging timeout**, because asking
+an app about its windows is a synchronous round trip into that app's run loop —
+a beachballing process would otherwise hold the main thread here for as long as
+it liked, and this runs while the HUD is animating.
+
+## Staying awake
+
+```
+"stay awake"                 "keep the mac awake"      "caffeinate"
+"stay awake for two hours"   "keep awake for half an hour"
+"stop staying awake"         "you can let it sleep now"
+```
+
+The opposite of the sleep command, and the reason both exist: telling a Mac to
+sleep is easy, and stopping it is the thing you actually want half way through a
+long download. `caffeinate` without the process — the same power-management
+assertion, taken in process and released when the time is up, when you say so,
+and when Jarvis quits.
+
+Deliberately the *idle system sleep* assertion rather than the display one. This
+is for a Mac that must keep working; forcing the screen to stay lit as well would
+flatten a laptop for a download that needed neither. The menu shows it while it
+is held and can let it go without your saying anything.
+
+## The clipboard
+
+```
+"copy that down 0 7 1 double 4 double 6"
+"note this down the meeting moved to thursday"
+"what's on my clipboard"
+```
+
+The one command that is really about *dictation* — everything else Jarvis does
+with what you say is work out which action you meant, and this simply keeps the
+words. Useful for the thing you want in a minute and don't want to open an app
+for: a number read out to you, an address, a line you thought of on the way past.
+No permission and nothing written to disk; it is the same clipboard ⌘C uses, so
+it is already wherever you were going to paste it.
+
+Read back, a long clipboard is **described rather than recited**. Four hundred
+words of copied article read aloud is not an answer to "what's on my clipboard",
+so past a sentence or two it says how much there is and reads the beginning.
+
+
 ## Locking the screen
 
 ```
@@ -484,7 +586,31 @@ answer itself, and a wrong number is one you act on. So these never reach it.
 "what time is it in tokyo"             "what time is it in new york"
 "flip a coin"                          "roll a die"      "roll a d20"
 "pick a number between 1 and 10"       "what can you do"
+"how long until friday"                "how many days until december 25"
+"how many days until christmas"        "how many days until halloween"
+"what's on my clipboard"               "say that again"
 ```
+
+**Countdowns strip the opener before the date parser sees it**, and that is the
+whole of a bug worth recording. Handed "until December 25" complete with the
+word "until", `NSDataDetector` swallows the opener and answers with *today* at
+four in the afternoon — so "how many days until Christmas" came back as an hour
+and a half. It matched, it returned a date, and the date was nonsense. Only the
+tail after "until" goes to the parser now.
+
+A short table covers the holidays the system parser has never heard of —
+Christmas, New Year, Halloween, Valentine's, the Fourth of July, Guy Fawkes —
+resolved to the next time each comes round. Anything needing a rule rather than
+a date, Easter above all, goes to the model, which is fine at exactly that. And
+the answer is counted in **calendar days rather than 24-hour blocks**, because
+that is what the question means: Christmas is the same number of sleeps away
+whether you ask at breakfast or at midnight.
+
+**"Say that again"** repeats the last answer from what was already said, so it
+costs nothing, never asks the model to reproduce a line it wrote a moment ago,
+and works with Apple Intelligence switched off. Confirmations are not repeated —
+saying "Right away, sir" again helps nobody, and the line you missed is always
+the one carrying the fact.
 
 The **sums are parsed, not evaluated by a library**. `NSExpression` would be four
 lines, but it raises an Objective-C exception on malformed input — which Swift
@@ -536,15 +662,29 @@ The transcript is split into words and characters **once** rather than for every
 
 And **the phrases are now prepared too**. That first optimisation fixed one side of the comparison and left the other alone: every phrase was still being turned into an array of characters *and* an array of arrays of characters on each partial transcript. With a hundred-odd phrases that came to **100 µs a call**, more than half the cost of resolving anything, all of it re-deriving something that only changes when you edit your commands. The listener now keeps a prepared catalogue and rebuilds it when they change.
 
-That last one is what paid for this release. Doubling the number of built-in commands would otherwise have tripled tier 1; instead every phrase got faster than it was before:
+And a phrase that cannot possibly match is now rejected by **counting bits**. An
+edit distance is at least the number of *distinct characters* the phrase needs
+and the window hasn't got, because each one has to be inserted or substituted in
+and no single edit supplies two of them. Both sides carry a 36-bit character mask
+— one per word on the transcript side, so a window's mask is an OR as the window
+grows — and if the missing count exceeds what the cutoff allows, the matrix is
+never filled in. On a rambling sentence against a hundred-odd phrases that is
+most of the work: **three thousand distance calls became a few hundred**, for the
+same answer.
 
-| Spoken | Before (7 commands, 43 phrases) | Now (15 commands, 113 phrases) |
+Together these paid for the whole release. Tripling the number of built-in
+commands would otherwise have tripled tier 1; instead every phrase got faster
+than it was before, measured back to back on the same machine:
+
+| Spoken | Before (7 commands, 43 phrases) | Now (18 commands, 142 phrases) |
 |---|---|---|
-| "open chrome" | 184 µs | **108 µs** |
-| "jarvis open chrome on work" | 270 µs | **153 µs** |
-| "bring over xcode" | 571 µs | **213 µs** |
-| "what is the capital of france" | 751 µs | **653 µs** |
-| a rambling sentence matching nothing | 1614 µs | **1394 µs** |
+| "open chrome" | 309 µs | **181 µs** |
+| "start up the craft" | 515 µs | **271 µs** |
+| "jarvis open chrome on work" | 443 µs | **260 µs** |
+| "bring over xcode" | 951 µs | **262 µs** |
+| "open a new gmail tab" | 566 µs | **310 µs** |
+| "what is the capital of france" | 1262 µs | **1023 µs** |
+| a rambling sentence matching nothing | 2763 µs | **1952 µs** |
 
 None of it changes an answer, and that isn't taken on trust — `Tests/matcher` checks the cut-short distance against a plain full-matrix implementation, checks across thousands of generated phrases that every score at or above the bar comes back exactly as it would have, including scores landing precisely *on* it (which is where binary floating point would otherwise lose one), and checks that the prepared catalogue and the unprepared path resolve every phrase identically.
 
@@ -559,6 +699,18 @@ Crucially, the model doesn't pick the action itself — it just **names** what y
 **Tier 3** is pure flavour. The action already ran. The model gets what it just did and what you said, and writes one line in JARVIS's voice, which is spoken and shown under the headline. If it takes too long, drifts long, or asks a question, a canned line is used instead — it can never delay or break anything.
 
 Switch tiers 2 and 3 off entirely with **Use Apple Intelligence**. Everything still works; replies just come from a fixed list.
+
+## What the menu tells you
+
+Beyond the switches, the menu is where anything still running shows itself:
+
+- **A running timer**, with the time left, and a way to cancel it without
+  saying anything.
+- **A held-awake Mac**, with how much longer, and "Let it sleep".
+- **The last five things it did** — handy for catching a command that resolved
+  to something other than what you meant, without keeping the Clap Monitor open.
+- **Whatever permission is missing**, named for the feature that wants it rather
+  than in the abstract.
 
 ## The HUD
 
@@ -579,14 +731,30 @@ you no way at all to tell "listening" from "not working".
 
 The level is curved rather than linear, for the reason the answer strip's
 waveform is: speech is mostly quiet with brief loud peaks, and drawn straight it
-sits flat on the floor and twitches only on plosives. Fast attack, slow release,
-so it tracks the voice instead of strobing between frames.
+sits flat on the floor and twitches only on plosives.
 
-It costs two layer writes at the twenty-four frames a second the clap detector
-already reports, and **only while a phrase is being spoken** — the engine asks
-for levels when it arms and stops when it stops, so the idle cost is exactly
-zero. That mattered enough to derive the flag from the state machine in one
-place rather than set it by hand in each of the eight paths that end a phrase.
+Getting it *smooth* took two goes. The level arrives about twenty-three times a
+second, and the first version wrote it straight to the layer with animations
+disabled — so the dot moved in twenty-three discrete steps a second on a screen
+refreshing sixty or a hundred and twenty times, which reads as a jitter. It now
+animates **between** levels, over slightly longer than the gap to the next one,
+so Core Animation interpolates every intervening frame on the render thread.
+That is both smoother and cheaper than driving it from a timer: still two layer
+writes per level, and no per-frame work on the main thread at all.
+
+The other half was the attack. Snapping straight to a louder frame tracked the
+noise in the signal rather than the voice in it, so a rise is now followed
+quickly rather than instantly, and a fall slowly. Run a synthetic speech
+envelope through the filter and the frame-to-frame jerk falls by **eighty
+percent** while the peak still reaches 99% of where it would have — followed,
+not flattened. `Tests/answers` measures exactly that, so "smoother" is a number
+rather than an opinion.
+
+It costs two layer writes per level and **only while a phrase is being spoken** —
+the engine asks for levels when it arms and stops when it stops, so the idle
+cost is exactly zero. That mattered enough to derive the flag from the state
+machine in one place rather than set it by hand in each of the eight paths that
+end a phrase.
 
 ### The corner readouts say something true
 
@@ -599,6 +767,28 @@ measurement.
 
 They are read once per HUD rather than once per display, so a Mac with three
 monitors asks about its battery once.
+
+### The ring warms as your window runs out
+
+The countdown turns towards amber over the last quarter of the listening window,
+so "you are running out of time to speak" is something you can see rather than
+something you have to count. Free: Core Animation interpolates the colour on the
+GPU alongside the sweep it is already drawing.
+
+### A failure looks like one
+
+A command that ran and couldn't do what it was asked turns the reticle **amber**
+and says UNABLE, the same colour the cancel and stand-down paths already use.
+Until now a failure was a line of small grey text under a headline that had
+already flashed gold and burst — the HUD said ACCESS GRANTED and celebrated, and
+the only thing saying otherwise was the detail line.
+
+### Dimming is optional
+
+**Dim the screen behind it** turns off the tint and the pool of shadow, so the
+reticle floats over whatever you were looking at. Less legible on a bright
+desktop, which is the trade being offered rather than a bug — it is the one part
+of the HUD that covers your work.
 
 ### A timer keeps its own corner
 
@@ -715,11 +905,32 @@ name, and that a single unreadable command no longer takes the whole list with
 it.
 
 **`Tests/answers`** covers everything the Mac works out for itself: sums,
-percentages, unit conversions, timer durations, volume and transport words, and
-the search URL's escaping. Several of its cases are bugs that were caught here
-first — "3.5 plus 1.25" coming to a hundred and sixty, "12 8 plus 3" quietly
-answering 131, "half an hour" running for an hour, "two and a half hours" running
-for thirty minutes.
+percentages, unit conversions, timer durations, volume and transport words, where
+a window goes, how long something stays awake, the clipboard, countdowns to a
+date, and the search URL's escaping. Several of its cases are bugs that were
+caught here first — "3.5 plus 1.25" coming to a hundred and sixty, "12 8 plus 3"
+quietly answering 131, "half an hour" running for an hour, "two and a half hours"
+running for thirty minutes, "what should I eat on a diet" rolling a die because
+*diet* contains *die*, and Christmas being an hour and a half away.
+
+The reticle's smoothing is measured rather than eyeballed: a synthetic speech
+envelope goes through the filter and the test insists the frame-to-frame jerk
+falls by more than half while the peak still reaches most of its unsmoothed
+height. Smoothing that flattened the signal would pass the first check and fail
+the second.
+
+The resolver's timing guard takes the **best of five** runs and allows six
+milliseconds. Both are deliberate: a single timed batch measures the machine as
+much as the code — the same build measured 2799, 3239 and 3844 µs on three
+consecutive runs of a laptop with a game open — and the guard exists to catch an
+order-of-magnitude regression, not a drift. The per-phrase numbers are printed
+either way, so real drift stays visible.
+
+Two sections of `Tests/commands` exist because of the one-short-word problem
+above: one asserts that nine ordinary sentences containing "time" are not
+commands, and another that "what's the cause of that" and "how big is the ship"
+are not either. A third holds every built-in phrase to being more than one short
+word.
 
 Gestures are covered the same way: the recogniser takes timestamped hand positions rather than reading a clock, so a synthetic stream can assert on the awkward cases directly — a hand entering frame, a hand put back down, a slow drift across the desk, one hand sweeping past a resting one, a dropped frame mid-swipe.
 

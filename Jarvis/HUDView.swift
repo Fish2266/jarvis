@@ -47,6 +47,9 @@ final class HUDView: NSView {
     /// Smoothed level, 0…1. Fast attack, slow release — the same shaping the
     /// answer strip's bars use, and for the same reason: raw frames strobe.
     private var voice: CGFloat = 0
+    /// Set once the phrase is over, so a level still in flight from the audio
+    /// thread can't restart the dot after the reticle has moved on.
+    private var settled = false
 
     // MARK: - Setup
 
@@ -75,20 +78,27 @@ final class HUDView: NSView {
 
         // Screen darkening: a flat tint plus a pool of shadow behind the reticle,
         // so the cyan reads against a bright desktop.
-        tint.frame = bounds
-        tint.backgroundColor = CGColor(red: 0, green: 0.02, blue: 0.05, alpha: 0.58)
-        root.addSublayer(tint)
+        //
+        // Optional, because it is the one part of the HUD that hides your work.
+        // Turned off, the reticle floats over whatever you were looking at —
+        // less legible on a bright desktop, which is the trade being offered
+        // rather than a bug.
+        if Prefs.dimScreen {
+            tint.frame = bounds
+            tint.backgroundColor = CGColor(red: 0, green: 0.02, blue: 0.05, alpha: 0.58)
+            root.addSublayer(tint)
 
-        haze.frame = bounds
-        haze.type = .radial
-        haze.colors = [
-            CGColor(red: 0, green: 0.04, blue: 0.09, alpha: 0.62),
-            CGColor(red: 0, green: 0.03, blue: 0.08, alpha: 0.0),
-        ]
-        haze.locations = [0, 1]
-        haze.startPoint = CGPoint(x: 0.5, y: 0.5)
-        haze.endPoint = CGPoint(x: 1.1, y: 1.1)
-        root.addSublayer(haze)
+            haze.frame = bounds
+            haze.type = .radial
+            haze.colors = [
+                CGColor(red: 0, green: 0.04, blue: 0.09, alpha: 0.62),
+                CGColor(red: 0, green: 0.03, blue: 0.08, alpha: 0.0),
+            ]
+            haze.locations = [0, 1]
+            haze.startPoint = CGPoint(x: 0.5, y: 0.5)
+            haze.endPoint = CGPoint(x: 1.1, y: 1.1)
+            root.addSublayer(haze)
+        }
 
         buildBrackets()
         buildReadouts()
@@ -432,6 +442,7 @@ final class HUDView: NSView {
             flicker(status, delay: 0.20)
 
             countdown.strokeEnd = 1
+            countdown.strokeColor = HUD.cyan
             let unwind = CABasicAnimation(keyPath: "strokeEnd")
             unwind.fromValue = 1
             unwind.toValue = 0
@@ -439,6 +450,18 @@ final class HUDView: NSView {
             unwind.fillMode = .forwards
             unwind.isRemovedOnCompletion = false
             countdown.add(unwind, forKey: "countdown")
+
+            // The last quarter of the window warms towards amber, so "you are
+            // running out of time to speak" is something you can see without
+            // reading anything. Free: Core Animation interpolates the colour on
+            // the GPU alongside the sweep it is already drawing.
+            let warm = CAKeyframeAnimation(keyPath: "strokeColor")
+            warm.values = [HUD.cyan, HUD.cyan, HUD.amber]
+            warm.keyTimes = [0, 0.75, 1]
+            warm.duration = seconds
+            warm.fillMode = .forwards
+            warm.isRemovedOnCompletion = false
+            countdown.add(warm, forKey: "warm")
 
         case .confirmed(let headline, let detail):
             enter()
@@ -453,7 +476,7 @@ final class HUDView: NSView {
     /// `headline` is what Jarvis is *doing* — never the raw transcript.
     func confirm(headline text: String, detail detailText: String) {
         dismissWork?.cancel()
-        countdown.removeAnimation(forKey: "countdown")
+        stopCountdown()
         settleLevel()
 
         // Snap the countdown ring closed and turn the accents gold.
@@ -505,6 +528,17 @@ final class HUDView: NSView {
         scheduleDismiss(after: 2.6, duration: 0.55, expand: true)
     }
 
+    /// Ends the countdown and everything animating with it.
+    ///
+    /// The ring runs two animations — the sweep and the colour that warms with
+    /// it — and removing only the first left the second still driving the
+    /// stroke, so a command confirmed in the last second turned gold and then
+    /// slid back to amber underneath it.
+    private func stopCountdown() {
+        countdown.removeAnimation(forKey: "countdown")
+        countdown.removeAnimation(forKey: "warm")
+    }
+
     /// The microphone level, while it's listening.
     ///
     /// The dot at the centre swells with your voice. It is the one honest
@@ -513,17 +547,29 @@ final class HUDView: NSView {
     /// doing, never the transcript. A reticle that sat perfectly still for six
     /// seconds gave you no way to tell "listening" from "not working".
     ///
-    /// Two layer writes per frame, at the twenty-four frames a second the
-    /// detector reports, for the few seconds a phrase lasts. Actions are
-    /// disabled or Core Animation would add an implicit quarter-second fade to
-    /// each one and the dot would lag the voice by a syllable.
+    /// Smooth, and it took two fixes to get there. The level arrives about
+    /// twenty-three times a second, and the first version wrote it straight to
+    /// the layer with actions disabled — so the dot moved in twenty-three
+    /// discrete steps a second on a screen refreshing sixty or a hundred and
+    /// twenty times, which reads as a jitter. It now animates *between*
+    /// levels, over slightly longer than the gap to the next one, so Core
+    /// Animation interpolates every intervening frame on the render thread.
+    /// That is smoother and cheaper than driving it from a timer: still two
+    /// layer writes per level, and no per-frame work on the main thread at all.
+    ///
+    /// The other half was the attack. Snapping straight to a louder frame
+    /// tracked the noise in the signal rather than the voice in it, so a rise
+    /// is now followed quickly rather than instantly, and a fall slowly.
     func setLevel(_ rms: Float) {
-        guard let core else { return }
-        let target = HUD.voiceScale(rms)
-        voice = target > voice ? target : voice * 0.82 + target * 0.18
+        guard let core, !settled else { return }
+        voice = HUD.smoothed(voice, towards: HUD.voiceScale(rms))
 
         CATransaction.begin()
-        CATransaction.setDisableActions(true)
+        // Linear, because these are being chained end to end — an eased curve
+        // would slow down into every level and speed up out of it, which is the
+        // stutter this is meant to remove.
+        CATransaction.setAnimationDuration(HUD.levelInterval * 1.25)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
         let scale = 1 + voice * 0.55
         core.transform = CATransform3DMakeScale(scale, scale, 1)
         core.shadowOpacity = Float(0.45 + voice * 0.55)
@@ -532,7 +578,12 @@ final class HUDView: NSView {
 
     /// Puts the dot back to rest, so a confirmed command doesn't freeze it
     /// mid-syllable at whatever size the last word left it.
+    ///
+    /// `settled` latches, because a level can still be in flight from the audio
+    /// thread when a command resolves — and one arriving after this would set
+    /// the dot swelling again underneath the confirmation.
     private func settleLevel() {
+        settled = true
         guard let core else { return }
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.3)
@@ -559,7 +610,7 @@ final class HUDView: NSView {
     /// eye down to the strip coming up.
     func handOff() {
         dismissWork?.cancel()
-        countdown.removeAnimation(forKey: "countdown")
+        stopCountdown()
         settleLevel()
         setStatus("ANSWER", color: HUD.gold)
         scheduleDismiss(after: 0.12, duration: 0.45, expand: true)
@@ -579,7 +630,7 @@ final class HUDView: NSView {
     /// Escape was pressed — get off the screen immediately.
     func cancel() {
         dismissWork?.cancel()
-        countdown.removeAnimation(forKey: "countdown")
+        stopCountdown()
         settleLevel()
         setText(status, "CANCELLED", size: 15, weight: .medium, color: HUD.amber, kern: 4)
         status.shadowColor = HUD.amber
@@ -588,9 +639,42 @@ final class HUDView: NSView {
         scheduleDismiss(after: 0.12, duration: 0.28, expand: false)
     }
 
+    /// The command ran and could not do what it was asked.
+    ///
+    /// Worth its own look. Until now a failure was a line of small grey text
+    /// under a headline that had already flashed gold and burst — the HUD said
+    /// "ACCESS GRANTED" and celebrated, and the only thing saying otherwise was
+    /// the detail line. Amber is the colour this app already uses for "no", on
+    /// the cancel and stand-down paths.
+    func markFailed(_ detail: String) {
+        dismissWork?.cancel()
+        stopCountdown()
+        settleLevel()
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.25)
+        countdown.strokeColor = HUD.amber
+        countdown.shadowColor = HUD.amber
+        for ring in accentRings {
+            ring.strokeColor = HUD.amber
+            ring.shadowColor = HUD.amber
+        }
+        for bracket in brackets {
+            bracket.strokeColor = HUD.amber
+            bracket.shadowColor = HUD.amber
+        }
+        CATransaction.commit()
+
+        setText(status, "UNABLE", size: 15, weight: .bold, color: HUD.amber, kern: 5)
+        status.shadowColor = HUD.amber
+        flicker(status, delay: 0)
+        if !detail.isEmpty { setDetail(detail, animated: true) }
+        scheduleDismiss(after: 2.2, duration: 0.45, expand: false)
+    }
+
     func standDown() {
         dismissWork?.cancel()
-        countdown.removeAnimation(forKey: "countdown")
+        stopCountdown()
         settleLevel()
         setText(status, "STANDING DOWN", size: 15, weight: .medium, color: HUD.amber, kern: 4)
         status.shadowColor = HUD.amber

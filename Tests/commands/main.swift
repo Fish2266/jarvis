@@ -25,7 +25,8 @@ func named(_ s: String) -> String { resolve(s)?.macro.name ?? "nothing" }
 print("=== the new commands resolve ===")
 let expected: [(String, String)] = [
     ("set a timer for five minutes", "Timer"),
-    ("timer for 30 seconds", "Timer"),
+    ("start a timer for 30 seconds", "Timer"),
+    ("set a ten minute timer", "Timer"),
     ("cancel the timer", "Timer"),
     ("stop the timer", "Timer"),
     ("how long is left", "Timer"),
@@ -38,9 +39,18 @@ let expected: [(String, String)] = [
     ("how loud is it", "Volume"),
     ("next track", "Playback"),
     ("previous track", "Playback"),
-    ("pause", "Playback"),
+    ("pause it", "Playback"),
+    ("pause the music", "Playback"),
     ("skip this", "Playback"),
     ("resume", "Playback"),
+    ("snap left", "Window"),
+    ("right half", "Window"),
+    ("maximize", "Window"),
+    ("full screen", "Window"),
+    ("stay awake", "Stay awake"),
+    ("keep the mac awake", "Stay awake"),
+    ("caffeinate", "Stay awake"),
+    ("stop staying awake", "Stay awake"),
     ("lock the screen", "Lock"),
     ("jarvis lock the screen", "Lock"),
     ("lock my mac", "Lock"),
@@ -94,6 +104,38 @@ for (said, want) in unchanged {
     check("\"\(said)\" is still \(want)", named(said) == want, named(said))
 }
 
+print("\n=== copying captures what follows the phrase ===")
+for (said, kept) in [("copy that down 0 7 1 double 4 double 6",
+                      "0 7 1 double 4 double 6"),
+                     ("note this down the meeting moved to thursday",
+                      "the meeting moved to thursday")] {
+    let r = resolve(said)
+    check("\"\(said)\"", r?.macro.kind == .clipboard && r?.payload == kept,
+          "\(r?.macro.name ?? "nothing") payload=\(r?.payload ?? "-")")
+}
+
+print("\n=== the clock still belongs to the clock ===")
+// A bare "timer" is one typo from "time", and the coverage count gives a
+// one-word phrase full marks for a single fuzzy word — so every sentence
+// containing "time" fired the timer, and "what time is it" stopped being
+// answered from the system clock. Every one of these shipped broken once.
+for said in ["what time is it", "whats the time", "what time is it in tokyo",
+             "do you have the time", "how much time do i have",
+             "time for a break", "what a waste of time", "what day is it",
+             "what time should i go to sleep"] {
+    check("\"\(said)\" is not a command", resolve(said) == nil, named(said))
+}
+
+print("\n=== nor does one typo make a command ===")
+// Same failure, different words: "cause" is one edit from "pause", "ship" from
+// "skip", "mate" from "mute". A phrase of two words cannot be reached this way,
+// because the second word has to be there as well.
+for said in ["whats the cause of that", "how big is the ship",
+             "how do i sleep better", "tell me about sleep",
+             "is my mac asleep", "how much space is left"] {
+    check("\"\(said)\" is not a command", resolve(said) == nil, named(said))
+}
+
 print("\n=== questions that merely sound like commands ===")
 // "how much time is left" was a Timer phrase until it turned out to be one word
 // from "how much space is left", which is a question about the disk.
@@ -143,6 +185,22 @@ for kind in ActionKind.allCases {
 }
 check("exactly two kinds need a near-exact phrase",
       ActionKind.allCases.filter(\.requiresExactPhrase).map(\.rawValue) == ["lock", "sleep"])
+// A phrase of one word is reachable by a single fuzzy word match — the typo
+// budget is one edit for anything four letters or longer — which is how "timer"
+// was fired by "time" and "pause" by "cause". The shorter the word, the more
+// ordinary words sit one edit away, so a built-in single-word phrase has to be
+// long enough for that neighbourhood to be empty.
+//
+// "mute" is the one deliberate exception, and it is a judgement rather than an
+// oversight: its neighbours are "mate", "mule" and "muse", none of which turn
+// up in a sentence you would say to a computer, whereas "cause" and "ship" do.
+let shortWordExceptions: Set<String> = ["mute"]
+for macro in Macro.added {
+    for phrase in macro.phrases where phrase.split(separator: " ").count == 1 {
+        check("\(macro.name): \"\(phrase)\" is long enough to stand alone",
+              phrase.count >= 6 || shortWordExceptions.contains(phrase), phrase)
+    }
+}
 check("the kinds that speak for themselves say something",
       ActionKind.allCases.filter(\.handlesOwnReply).count >= 5)
 

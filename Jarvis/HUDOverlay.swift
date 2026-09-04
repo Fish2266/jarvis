@@ -68,6 +68,13 @@ final class HUDOverlay {
         views.forEach { $0.setLevel(rms) }
     }
 
+    /// The command ran and couldn't do what it was asked — say so in colour,
+    /// not just in small text under a headline that already celebrated.
+    func fail(_ detail: String) {
+        guard isShowing else { return }
+        views.forEach { $0.markFailed(detail) }
+    }
+
     /// Escape pressed.
     func cancel() {
         guard isShowing else { return }

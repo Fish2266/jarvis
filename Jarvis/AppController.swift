@@ -11,6 +11,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var monitor: MonitorWindow?
     private var commands: CommandsWindow?
     private var lastTranscript = ""
+    /// The last few actions, oldest first. Capped because this is a menu, not
+    /// a log — the Clap Monitor is where the whole history lives.
+    private var recent: [String] = []
+    private static let recentLimit = 5
 
     // MARK: - Lifecycle
 
@@ -25,6 +29,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         engine.onState = { [weak self] state in self?.render(state) }
         engine.onLevel = { [weak self] rms, bg in self?.monitor?.update(level: rms, background: bg) }
         engine.onLog = { [weak self] line in self?.monitor?.append(line) }
+        engine.onAction = { [weak self] label in
+            guard let self else { return }
+            self.recent.append(label)
+            if self.recent.count > Self.recentLimit { self.recent.removeFirst() }
+        }
         engine.onTranscript = { [weak self] text in
             self?.lastTranscript = text
             self?.monitor?.setTranscript(text)
@@ -99,6 +108,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         engine.stop()
+        // A power assertion belongs to the process that took it, so quitting
+        // would release it anyway — but saying so explicitly is what makes
+        // that true of every exit rather than most of them.
+        KeepAwake.shared.stop()
     }
 
     // MARK: - Status item
@@ -175,6 +188,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(menu, "Cancel the timer", #selector(cancelTimer))
         }
 
+        if KeepAwake.shared.isActive {
+            menu.addItem(.separator())
+            let held = NSMenuItem(
+                title: "Staying awake — \(KeepAwake.describe(KeepAwake.shared.until))",
+                action: nil, keyEquivalent: "")
+            held.isEnabled = false
+            menu.addItem(held)
+            add(menu, "Let it sleep", #selector(letItSleep))
+        }
+
+        // The last few things it did. Handy for spotting a command that
+        // resolved to something other than what you meant, without having to
+        // keep the Clap Monitor open to see it.
+        if !recent.isEmpty {
+            menu.addItem(.separator())
+            let header = NSMenuItem(title: "Recent", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for line in recent.reversed() {
+                let item = NSMenuItem(title: "    \(line)", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+
         menu.addItem(.separator())
         add(menu, "Enabled", #selector(toggleEnabled), checked: Prefs.enabled)
 
@@ -238,6 +276,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, "Reuse an open tab (no fixed profile)", #selector(toggleReuseTabs),
             checked: Prefs.reuseTabs)
         add(menu, "Show the HUD", #selector(toggleHUD), checked: Prefs.showHUD)
+        if Prefs.showHUD {
+            add(menu, "Dim the screen behind it", #selector(toggleDim), checked: Prefs.dimScreen)
+        }
 
         let gestures = add(menu, "Hand gestures after a double clap",
                            #selector(toggleGestures), checked: Prefs.gestures)
@@ -530,6 +571,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func useFahrenheit() { Prefs.useCelsius = false }
     @objc private func useCelsius() { Prefs.useCelsius = true }
 
+    @objc private func toggleDim() { Prefs.dimScreen.toggle() }
+
     @objc private func toggleHUD() {
         Prefs.showHUD.toggle()
         guard Prefs.showHUD else {
@@ -621,6 +664,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func previewHUD() {
         HUDOverlay.shared.preview(reply: Intelligence.cannedReplies.randomElement() ?? "Welcome home, sir.")
     }
+
+    @objc private func letItSleep() { KeepAwake.shared.stop() }
 
     @objc private func cancelTimer() {
         guard Countdown.shared.cancel() else { return }

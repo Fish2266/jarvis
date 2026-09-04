@@ -50,6 +50,30 @@ enum PhraseMatcher {
         return out
     }
 
+    /// Which characters a string contains, as one bit each.
+    ///
+    /// The point of it: an edit distance is at least the number of *distinct*
+    /// characters the target needs and the source hasn't got, because each one
+    /// has to be inserted or substituted in, and no single edit can supply two
+    /// of them. So a phrase whose letters are largely absent from a window can
+    /// be rejected by counting bits instead of filling in a matrix.
+    ///
+    /// Twenty-six letters and ten digits, which is everything `normalize`
+    /// produces from ASCII. Anything else — a folded character the non-ASCII
+    /// path let through — shares the last bit. That makes the filter weaker
+    /// for those strings and never wrong: a shared bit can only make two
+    /// characters look alike, which loses a skip rather than causing one.
+    static func mask<S: Sequence<Character>>(of characters: S) -> UInt64 {
+        var bits: UInt64 = 0
+        for c in characters {
+            guard let ascii = c.asciiValue else { bits |= 1 << 63; continue }
+            if ascii >= 97, ascii <= 122 { bits |= 1 << UInt64(ascii - 97) }
+            else if ascii >= 48, ascii <= 57 { bits |= 1 << UInt64(ascii - 48 + 26) }
+            else if ascii != 32 { bits |= 1 << 63 }
+        }
+        return bits
+    }
+
     static func matches(transcript: String, phrase: String, threshold: Double = 0.78) -> Bool {
         score(transcript: transcript, phrase: phrase) >= threshold
     }
@@ -82,6 +106,9 @@ enum PhraseMatcher {
         /// so the ranges below are exact whatever arrives.
         fileprivate let packed: [Character]
         fileprivate let wordRanges: [Range<Int>]
+        /// One per word, so a window's mask is the OR of the words in it and
+        /// costs nothing to extend as the window grows.
+        fileprivate let wordMasks: [UInt64]
 
         var characters: Int { packed.count }
         var wordCount: Int { wordRanges.count }
@@ -95,14 +122,17 @@ enum PhraseMatcher {
             var characters: [Character] = []
             characters.reserveCapacity(normalized.count)
             var ranges: [Range<Int>] = []
+            var masks: [UInt64] = []
             for word in normalized.split(separator: " ") {
                 if !characters.isEmpty { characters.append(" ") }
                 let start = characters.count
                 characters.append(contentsOf: word)
                 ranges.append(start..<characters.count)
+                masks.append(PhraseMatcher.mask(of: word))
             }
             packed = characters
             wordRanges = ranges
+            wordMasks = masks
         }
 
         /// The words from `start` through `end`, inclusive, with the single
@@ -114,6 +144,8 @@ enum PhraseMatcher {
         fileprivate func word(_ index: Int) -> ArraySlice<Character> {
             packed[wordRanges[index]]
         }
+
+        fileprivate func wordMask(_ index: Int) -> UInt64 { wordMasks[index] }
     }
 
     /// A normalized phrase, split once — the mirror of `Haystack`.
@@ -133,6 +165,8 @@ enum PhraseMatcher {
         let utf8Count: Int
         fileprivate let characters: [Character]
         fileprivate let words: [[Character]]
+        fileprivate let mask: UInt64
+        fileprivate let wordMasks: [UInt64]
 
         var isEmpty: Bool { text.isEmpty }
 
@@ -140,7 +174,10 @@ enum PhraseMatcher {
             text = normalized
             utf8Count = normalized.utf8.count
             characters = Array(normalized)
-            words = normalized.split(separator: " ").map(Array.init)
+            let split = normalized.split(separator: " ").map(Array.init) as [[Character]]
+            words = split
+            mask = PhraseMatcher.mask(of: normalized)
+            wordMasks = split.map { PhraseMatcher.mask(of: $0) }
         }
     }
 
@@ -243,7 +280,10 @@ enum PhraseMatcher {
 
         var best = 0.0
         for start in 0..<h.wordCount {
+            // Grows with the window, one OR per word.
+            var windowMask: UInt64 = 0
             for end in start..<h.wordCount {
+                windowMask |= h.wordMask(end)
                 let window = h.window(start, end)
                 if window.count >= floor {
                     // Nothing below the bar, or below what has already been
@@ -254,9 +294,19 @@ enum PhraseMatcher {
                     // on the bar still counts, and `(1 - 0.72) * 25` comes out a
                     // hair under seven in binary.
                     let cutoff = Int((1 - max(bar, best)) * Double(longest) + 1e-9)
-                    let distance = levenshtein(window, target, limit: cutoff)
-                    if distance <= cutoff {
-                        best = max(best, 1.0 - Double(distance) / Double(longest))
+                    // Every character the phrase needs and this window hasn't
+                    // got costs at least one edit, and no single edit supplies
+                    // two of them — so if there are more of those than the
+                    // cutoff allows, the matrix cannot come back small enough
+                    // and there is no point filling it in. On a rambling
+                    // sentence against a hundred-odd phrases this is most of
+                    // the work: three thousand distance calls became a few
+                    // hundred, and the answer is the same one.
+                    if (needle.mask & ~windowMask).nonzeroBitCount <= cutoff {
+                        let distance = levenshtein(window, target, limit: cutoff)
+                        if distance <= cutoff {
+                            best = max(best, 1.0 - Double(distance) / Double(longest))
+                        }
                     }
                 }
                 if window.count > ceiling { break }
@@ -279,15 +329,18 @@ enum PhraseMatcher {
 
         var hits = 0
         var misses = 0
-        for token in need {
+        for (position, token) in need.enumerated() {
             let budget = token.count >= 4 ? 1 : 0
+            let tokenMask = needle.wordMasks[position]
             var found = false
             for index in 0..<h.wordCount {
                 let word = h.word(index)
                 // An edit distance is never smaller than the difference in
                 // length, so a word the budget can't cover on length alone
-                // skips the matrix.
+                // skips the matrix — and the same is true of a character the
+                // token needs that the word simply hasn't got.
                 guard abs(word.count - token.count) <= budget,
+                      (tokenMask & ~h.wordMask(index)).nonzeroBitCount <= budget,
                       levenshtein(word, token[...], limit: budget) <= budget
                 else { continue }
                 found = true

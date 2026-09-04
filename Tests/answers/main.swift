@@ -270,7 +270,194 @@ check("nothing reads as nothing",
 check("blank titles don't become empty items",
       Agenda.summarize(["  ", "buy milk"], noun: "reminder").hasPrefix("One reminder"))
 
+print("\n=== where a window goes ===")
+let placements: [(String, WindowManager.Placement)] = [
+    ("snap left", .left), ("put it on the right", .right),
+    ("left half", .left), ("right half", .right),
+    ("top half", .top), ("bottom half", .bottom),
+    ("top left", .topLeft), ("bottom right", .bottomRight),
+    ("upper right", .topRight), ("lower left", .bottomLeft),
+    ("maximize", .maximize), ("maximise", .maximize), ("fill the screen", .maximize),
+    ("full screen", .fullScreen), ("centre the window", .center),
+    ("center the window", .center),
+]
+for (said, want) in placements {
+    check("\"\(said)\"", WindowManager.placement(for: said) == want,
+          "\(String(describing: WindowManager.placement(for: said)))")
+}
+// "top left" must never be read as the bare "left", or every corner would
+// become a half.
+check("a corner beats a side",
+      WindowManager.placement(for: "put it top left") == .topLeft)
+// Whole words: "left" is inside "leftover", "top" inside "laptop".
+for said in ["put the laptop down", "i have leftovers", "open chrome"] {
+    check("\"\(said)\" moves nothing", WindowManager.placement(for: said) == nil,
+          "\(String(describing: WindowManager.placement(for: said)))")
+}
+// Two placements keep the window's own size rather than a fraction of the screen.
+check("centre and full screen have no rectangle",
+      WindowManager.Placement.center.fractions == nil
+        && WindowManager.Placement.fullScreen.fractions == nil)
+// Every fraction has to be inside the screen and non-empty, or a window would
+// land off the edge or with no size at all.
+for placement in [WindowManager.Placement.left, .right, .top, .bottom, .topLeft,
+                  .topRight, .bottomLeft, .bottomRight, .maximize] {
+    guard let (x, y, w, h) = placement.fractions else { continue }
+    check("\(placement.label) stays on screen",
+          x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= 1.0001 && y + h <= 1.0001,
+          "\(x) \(y) \(w) \(h)")
+}
+
+print("\n=== staying awake ===")
+check("a bare request holds indefinitely",
+      KeepAwake.intent(in: "stay awake") == .hold(nil))
+check("a length is honoured",
+      KeepAwake.intent(in: "stay awake for two hours") == .hold(7200))
+check("half an hour is thirty minutes",
+      KeepAwake.intent(in: "keep awake for half an hour") == .hold(1800))
+// Cancel is read before the length, so a release that names one is still a
+// release — the same ordering the timer needs.
+check("stopping is stopping", KeepAwake.intent(in: "stop staying awake") == .release)
+check("letting it sleep is stopping",
+      KeepAwake.intent(in: "you can let it sleep now") == .release)
+check("asking is asking", KeepAwake.intent(in: "how long is left on that") == .report)
+check("an unheld Mac describes itself", KeepAwake.describe(nil) == "until you say otherwise")
+
+print("\n=== the clipboard ===")
+// This is the real system pasteboard, so whatever was on it is put back at the
+// end. Running the tests should not cost you the thing you had copied.
+let clipboardBefore = Clipboard.read()
+check("copying keeps what was said", Clipboard.copy("buy milk and eggs"))
+check("...and reads it back", Clipboard.read() == "buy milk and eggs")
+check("an empty dictation throws nothing away", Clipboard.copy("   ") == false)
+check("what it had is still there", Clipboard.read() == "buy milk and eggs")
+check("a short clipboard is read out",
+      Clipboard.spokenSummary().contains("buy milk and eggs"))
+// Reading four hundred words aloud is not an answer to "what's on my clipboard".
+_ = Clipboard.copy(Array(repeating: "word", count: 300).joined(separator: " "))
+let long = Clipboard.spokenSummary()
+check("a long one is described, not recited",
+      long.contains("300 words") && long.count < 220, "\(long.count) chars")
+check("the headline is shortened too",
+      Clipboard.headline(for: String(repeating: "x", count: 200)).count < 60)
+if let clipboardBefore { _ = Clipboard.copy(clipboardBefore) }
+check("the clipboard is left as it was found", Clipboard.read() == clipboardBefore,
+      clipboardBefore == nil ? "was empty, and an empty copy is refused" : "restored")
+
+print("\n=== how long until something ===")
+let noonToday = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+check("a time later today counts in minutes",
+      Questions.untilAnswer("how long until 3pm", now: noonToday)?.contains("hour") == true,
+      Questions.untilAnswer("how long until 3pm", now: noonToday) ?? "nil")
+check("a date counts in days",
+      Questions.untilAnswer("how many days until december 25", now: noonToday) != nil)
+check("an ordinary question is not a countdown",
+      Questions.untilAnswer("why is the sky blue", now: noonToday) == nil)
+check("an opener with no date in it answers nothing",
+      Questions.untilAnswer("how long until i finish", now: noonToday) == nil)
+
+// The opener has to be taken off before the date parser sees it. Handed
+// "until december 25" whole, NSDataDetector swallows the word "until" and
+// answers with *today* at four in the afternoon — so "how many days until
+// Christmas" came back as an hour and a half. It matched, it returned a date,
+// and the date was nonsense.
+let sept4 = Calendar.current.date(from: DateComponents(
+    year: 2026, month: 9, day: 4, hour: 10, minute: 36))!
+let countdowns: [(String, String)] = [
+    ("how many days until christmas", "112 days"),
+    ("how long until christmas", "112 days"),
+    ("how many days until xmas", "112 days"),
+    ("how many days until december 25", "112 days"),
+    ("how many days until halloween", "57 days"),
+    ("how many days until new years", "119 days"),
+    ("how many days until new years eve", "118 days"),
+    ("how many days until valentines day", "163 days"),
+]
+for (said, want) in countdowns {
+    let got = Questions.untilAnswer(said, now: sept4)
+    check("\"\(said)\" = \(want)", got?.hasPrefix(want) == true, got ?? "nil")
+}
+// Counted in calendar days, not 24-hour blocks: Christmas is the same number of
+// sleeps away whether you ask at breakfast or at midnight.
+let lateSept4 = Calendar.current.date(from: DateComponents(
+    year: 2026, month: 9, day: 4, hour: 23, minute: 55))!
+check("the day count doesn't shift with the time of day",
+      Questions.untilAnswer("how many days until christmas", now: sept4)
+        == Questions.untilAnswer("how many days until christmas", now: lateSept4))
+// A holiday already gone this year rolls to the next.
+let boxingDay = Calendar.current.date(from: DateComponents(
+    year: 2026, month: 12, day: 26, hour: 12))!
+check("a passed holiday rolls to next year",
+      Questions.untilAnswer("how many days until halloween", now: boxingDay)?
+        .hasPrefix("309 days") == true,
+      Questions.untilAnswer("how many days until halloween", now: boxingDay) ?? "nil")
+// "How long to" is not an opener, or "how long to boil an egg" would be one.
+check("\"how long to boil an egg\" is not a countdown",
+      Questions.untilAnswer("how long to boil an egg", now: sept4) == nil)
+check("a holiday the table hasn't got falls through to the model",
+      Questions.untilAnswer("how many days until my birthday", now: sept4) == nil)
+
+print("\n=== asking for it again ===")
+for said in ["say that again", "repeat that", "what was that", "one more time",
+             "what did you say", "come again"] {
+    check("\"\(said)\" asks for a repeat", Questions.isRepeatRequest(said))
+    check("\"\(said)\" reaches the answer path", Questions.looksLikeQuestion(said))
+}
+for said in ["what time is it", "open chrome", "how are you"] {
+    check("\"\(said)\" is not a repeat", !Questions.isRepeatRequest(said))
+}
+
 print("\n=== the HUD's level curve ===")
+// The reticle's dot animates between levels rather than snapping to each one,
+// so it needs to know how long the gap is. Levels arrive every 2048 samples.
+check("the level interval is a sane default before the engine starts",
+      HUD.levelInterval > 0.02 && HUD.levelInterval < 0.1,
+      String(format: "%.1f ms", HUD.levelInterval * 1000))
+HUD.audioRate = 48_000
+check("2048 samples at 48 kHz is 43 ms",
+      abs(2048.0 / 48_000 - 0.04267) < 0.0005)
+
+// The dot used to be written straight to the layer with animations off, once
+// per level — twenty-three discrete steps a second on a screen refreshing sixty
+// or more, which reads as a jitter. Two things fixed it: Core Animation now
+// interpolates between levels, and the level itself is filtered rather than
+// snapped to. The second half is measurable.
+//
+// A synthetic speech envelope: a slow swell with frame-to-frame noise on it,
+// which is what a real RMS looks like.
+var seed: UInt64 = 0x9E3779B97F4A7C15
+func noise() -> Double {          // deterministic, so the test cannot flake
+    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+    return Double((seed >> 33) % 1000) / 1000.0
+}
+let raw: [Float] = (0..<400).map { i in
+    let swell = (sin(Double(i) / 18.0) + 1) / 2
+    return Float(max(0, min(0.05, (swell * 0.035 + noise() * 0.018))))
+}
+/// Total frame-to-frame change in direction — how much the motion stutters.
+func jerk(_ values: [CGFloat]) -> CGFloat {
+    guard values.count > 2 else { return 0 }
+    var total: CGFloat = 0
+    for i in 2..<values.count {
+        total += abs((values[i] - values[i - 1]) - (values[i - 1] - values[i - 2]))
+    }
+    return total
+}
+let unsmoothed = raw.map { HUD.voiceScale($0) }
+var running: CGFloat = 0
+let smoothed = raw.map { sample -> CGFloat in
+    running = HUD.smoothed(running, towards: HUD.voiceScale(sample))
+    return running
+}
+let before = jerk(unsmoothed), after = jerk(smoothed)
+check("filtering the level cuts the stutter by more than half",
+      after < before * 0.5, String(format: "jerk %.1f -> %.1f", before, after))
+// ...without flattening it into something that no longer follows the voice.
+check("and it still follows the swell",
+      (smoothed.max() ?? 0) > (unsmoothed.max() ?? 0) * 0.6,
+      String(format: "peak %.2f vs %.2f", smoothed.max() ?? 0, unsmoothed.max() ?? 0))
+check("a rise is followed faster than a fall", HUD.voiceAttack > HUD.voiceRelease)
+check("neither is a snap", HUD.voiceAttack < 1 && HUD.voiceRelease > 0)
 check("silence draws nothing", HUD.voiceScale(0) == 0)
 check("a loud frame fills it", HUD.voiceScale(0.05) == 1)
 check("it never overflows", HUD.voiceScale(10) == 1)
