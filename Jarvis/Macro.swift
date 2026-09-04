@@ -1,35 +1,98 @@
 import Foundation
 
+/// What a command does.
+///
+/// The order here is the order of the Action menu in the editor, so it runs
+/// from the things most commands are (open something) to the things few are
+/// (sleep the Mac). Raw values are stored in your preferences and must never
+/// change; new cases can be added freely, because a `Macro` written by an
+/// older build simply doesn't mention them.
 enum ActionKind: String, Codable, CaseIterable {
-    case app, url, weather, reminder, sleep
+    case app, url, search
+    case weather, forecast
+    case reminder, reminders, agenda
+    case timer, volume, media
+    case lock, sleep
 
     var title: String {
         switch self {
-        case .app: return "Open an app"
-        case .url: return "Open a website"
-        case .weather: return "Report the weather"
-        case .reminder: return "Add a reminder"
-        case .sleep: return "Put the Mac to sleep"
+        case .app:       return "Open an app"
+        case .url:       return "Open a website"
+        case .search:    return "Search the web"
+        case .weather:   return "Report the weather"
+        case .forecast:  return "Report tomorrow's forecast"
+        case .reminder:  return "Add a reminder"
+        case .reminders: return "Read out your reminders"
+        case .agenda:    return "Read out your calendar"
+        case .timer:     return "Set a timer"
+        case .volume:    return "Change the volume"
+        case .media:     return "Play, pause or skip"
+        case .lock:      return "Lock the screen"
+        case .sleep:     return "Put the Mac to sleep"
         }
     }
 
     /// Kinds whose phrase is a prefix and whose remaining words are the content.
-    var capturesText: Bool { self == .reminder }
+    ///
+    /// These never reach the ordinary fuzzy matcher — the phrase has to be at
+    /// the front and something has to follow it — so a kind belongs here only
+    /// if the words after the phrase are the *point* of the command. A timer
+    /// deliberately isn't one: "cancel the timer" has nothing after it to
+    /// capture, and splitting timers across two mechanisms to get that would
+    /// be two places to look when one of them is wrong.
+    var capturesText: Bool { self == .reminder || self == .search }
 
     /// Kinds that must match a phrase almost exactly rather than by containment.
     ///
     /// Sleeping the Mac mid-sentence would be miserable, and ordinary fuzzy
     /// matching would fire on "how do i sleep better" because it contains
     /// "sleep". These only run when you say the phrase and little else.
-    var requiresExactPhrase: Bool { self == .sleep }
+    ///
+    /// Locking the screen is here for the same reason and one more: "lock" is
+    /// a common enough word that containment would fire it on "what's the lock
+    /// screen shortcut".
+    var requiresExactPhrase: Bool { self == .sleep || self == .lock }
 
     /// Kinds that speak for themselves, so the usual generated reply is skipped.
-    var handlesOwnReply: Bool { self == .sleep }
+    ///
+    /// Two reasons to be on this list. Sleep and lock take the screen away a
+    /// moment later, so the line is said first and the action follows — a
+    /// generated reply arriving half a second after the Mac locked would be
+    /// talking to an empty room. The rest produce a *fact*: "volume at forty
+    /// percent", "three reminders", "five minutes left". A model paraphrase of
+    /// a fact is slower, occasionally wrong about the number, and no more
+    /// charming for it — and without this they would say both lines, one over
+    /// the other.
+    var handlesOwnReply: Bool {
+        switch self {
+        case .sleep, .lock, .timer, .volume, .media, .reminders, .agenda: return true
+        case .app, .url, .search, .weather, .forecast, .reminder: return false
+        }
+    }
+
+    /// Kinds that read the whole sentence rather than a captured tail.
+    ///
+    /// "turn it up", "next track" and "cancel the timer" are all one command
+    /// each with the detail buried in the words, so the action is handed what
+    /// you actually said and works it out.
+    var readsSentence: Bool { self == .timer || self == .volume || self == .media }
 
     /// Kinds with a window that "bring it over" could move to this desktop.
     /// The rest ignore the request and just do their usual thing, so "gimme
     /// the weather" still reports the weather rather than falling flat.
-    var canBeBrought: Bool { self == .app || self == .url }
+    var canBeBrought: Bool { self == .app || self == .url || self == .search }
+
+    /// Kinds "quit it" can act on. Only an app has a process to end — a
+    /// website command names a page, not something running — and as with
+    /// bringing, anything else ignores the request rather than failing.
+    var canBeQuit: Bool { self == .app }
+
+    /// Kinds that produce something to be read rather than an action to watch.
+    ///
+    /// These hand their result to the answer strip, which lingers and draws the
+    /// voice under it, instead of the reticle's headline — a list of three
+    /// reminders is a sentence, not a status.
+    var answersAloud: Bool { self == .reminders || self == .agenda }
 }
 
 /// One user-programmable command.
@@ -51,11 +114,22 @@ struct Macro: Codable, Equatable, Identifiable {
     /// What the HUD says while this runs — the action, never the transcript.
     var actionLabel: String {
         switch kind {
-        case .app, .url:
-            guard let profile = Browser.profileName(for: chromeProfile) else { return "Opening \(name)" }
-            return "Opening \(name) · \(profile)"
+        case .app, .url, .search:
+            let verb = kind == .search ? "Searching" : "Opening"
+            let subject = kind == .search ? "the web" : name
+            guard let profile = Browser.profileName(for: chromeProfile) else {
+                return "\(verb) \(subject)"
+            }
+            return "\(verb) \(subject) · \(profile)"
         case .weather:   return "Checking the weather"
+        case .forecast:  return "Checking tomorrow"
         case .reminder:  return "Adding a reminder"
+        case .reminders: return "Checking your reminders"
+        case .agenda:    return "Checking your calendar"
+        case .timer:     return "Timer"
+        case .volume:    return "Volume"
+        case .media:     return "Playback"
+        case .lock:      return "Locking up"
         case .sleep:     return "Going to sleep"
         }
     }
@@ -63,12 +137,20 @@ struct Macro: Codable, Equatable, Identifiable {
     var subtitle: String {
         switch kind {
         case .app:     return (target as NSString).lastPathComponent
-        case .url:
-            guard let profile = Browser.profileName(for: chromeProfile) else { return target }
-            return "\(target) · \(profile)"
-        case .weather: return "Local conditions"
-        case .reminder: return target.isEmpty ? "Default list" : target
-        case .sleep: return "Sleep only — never shut down or restart"
+        case .url, .search:
+            let base = kind == .search && target.isEmpty ? "Google" : target
+            guard let profile = Browser.profileName(for: chromeProfile) else { return base }
+            return "\(base) · \(profile)"
+        case .weather:   return "Local conditions"
+        case .forecast:  return "Tomorrow, where you are"
+        case .reminder:  return target.isEmpty ? "Default list" : target
+        case .reminders: return "Read out, never changed"
+        case .agenda:    return "Today, read out"
+        case .timer:     return "One at a time"
+        case .volume:    return "Up, down, mute, or a number"
+        case .media:     return "Whatever is playing"
+        case .lock:      return "Lock only — never shut down or restart"
+        case .sleep:     return "Sleep only — never shut down or restart"
         }
     }
 }
@@ -121,23 +203,138 @@ extension Macro {
             name: "Gmail",
             phrases: ["gmail", "my email", "email", "my mail"],
             kind: .url, target: "https://mail.google.com"))
+        macros.append(contentsOf: added)
         return macros
     }
+
+    /// Built-in commands newer than the first release.
+    ///
+    /// Kept apart from `seeded` because they have a second job: `MacroStore`
+    /// hands them to anyone whose commands were saved before they existed, so
+    /// a feature added today reaches a Mac that has been running Jarvis for
+    /// months. Appending to `seeded` alone would have shipped every one of
+    /// these to new installs only — the saved list is never re-seeded.
+    static let added: [Macro] = [
+        Macro(name: "Search",
+              phrases: ["search for", "search the web for", "look up", "look for",
+                        "google for", "search google for", "web search for",
+                        "do a search for"],
+              kind: .search, target: "https://www.google.com/search?q="),
+        // Deliberately not "how much time is left": that is one word away from
+        // "how much space is left", close enough for the fuzzy matcher to fire
+        // the timer at a question about the disk.
+        Macro(name: "Timer",
+              phrases: ["timer", "set a timer", "start a timer", "cancel the timer",
+                        "stop the timer", "how long is left", "how long on the timer",
+                        "time left on the timer"],
+              kind: .timer, target: ""),
+        Macro(name: "Volume",
+              phrases: ["volume", "turn it up", "turn it down", "turn the volume up",
+                        "turn the volume down", "louder", "quieter", "mute", "unmute",
+                        "shut up", "be quiet", "how loud is it"],
+              kind: .volume, target: ""),
+        // Deliberately no bare "play": it is already a verb meaning "open", so
+        // "play minecraft" has to keep opening Minecraft. It costs nothing,
+        // because the key macOS sends is a *toggle* — "pause" starts a paused
+        // track as readily as it stops a playing one.
+        Macro(name: "Playback",
+              phrases: ["pause", "resume", "unpause", "play pause", "pause the music",
+                        "next track", "previous track", "next song", "previous song",
+                        "skip", "skip this", "skip the song", "last song"],
+              kind: .media, target: ""),
+        // Every phrase says "tomorrow", and that is deliberate. The Weather
+        // command already answers to "forecast", and two commands a hair apart
+        // in the matcher decide by array order rather than by what you meant —
+        // so this one only answers to sentences the other cannot match at all.
+        Macro(name: "Forecast",
+              phrases: ["tomorrows forecast", "tomorrows weather", "hows tomorrow looking",
+                        "whats tomorrow looking like", "whats tomorrow like",
+                        "will it rain tomorrow", "the forecast for tomorrow",
+                        "what about tomorrow"],
+              kind: .forecast, target: ""),
+        Macro(name: "My reminders",
+              phrases: ["my reminders", "whats on my list", "what are my reminders",
+                        "what do i have to do", "whats on my to do list",
+                        "read my reminders"],
+              kind: .reminders, target: ""),
+        Macro(name: "My day",
+              phrases: ["my day", "whats on today", "whats my day look like",
+                        "whats on my calendar", "my calendar", "my schedule",
+                        "whats my next meeting", "next meeting", "am i free"],
+              kind: .agenda, target: ""),
+        Macro(name: "Lock",
+              phrases: ["lock the screen", "lock it up", "lock up", "lock my mac",
+                        "lock the mac", "lock screen"],
+              kind: .lock, target: ""),
+    ]
 }
 
 enum MacroStore {
     private static let key = "macros"
+    private static let builtinsKey = "builtinsInstalled"
+
+    /// How many of `Macro.added` this build knows about. Bumped whenever a new
+    /// built-in is appended to that list.
+    static var builtinCount: Int { Macro.added.count }
 
     static func load() -> [Macro] {
         guard let data = UserDefaults.standard.data(forKey: key),
-              let macros = try? JSONDecoder().decode([Macro].self, from: data),
+              let macros = decode(data),
               !macros.isEmpty
         else {
             let seeded = Macro.seeded()
             save(seeded)
+            UserDefaults.standard.set(builtinCount, forKey: builtinsKey)
             return seeded
         }
-        return macros
+        return installNewBuiltins(into: macros)
+    }
+
+    /// Decodes the saved list, and survives one bad entry.
+    ///
+    /// Decoding the array in one go means a single unreadable command — one
+    /// written by a newer build with an action this one has never heard of —
+    /// throws the *whole* list away, and `load` then quietly reseeds over
+    /// everything you had written. Element by element, an unreadable command
+    /// is skipped and the rest of your commands come back.
+    static func decode(_ data: Data) -> [Macro]? {
+        if let macros = try? JSONDecoder().decode([Macro].self, from: data) { return macros }
+        guard let loose = try? JSONDecoder().decode([FailableMacro].self, from: data)
+        else { return nil }
+        let salvaged = loose.compactMap(\.macro)
+        return salvaged.isEmpty ? nil : salvaged
+    }
+
+    /// A macro that decodes to nil instead of throwing, so one bad element in
+    /// the array doesn't take the array with it.
+    private struct FailableMacro: Decodable {
+        let macro: Macro?
+        init(from decoder: Decoder) throws {
+            macro = try? Macro(from: decoder)
+        }
+    }
+
+    /// Gives an existing installation the built-ins it has never been offered.
+    ///
+    /// Runs once per new built-in, keyed on how many have been installed rather
+    /// than on their names — so a command you deliberately deleted stays
+    /// deleted, and one added in a later version still arrives. Anything
+    /// already present under the same name is skipped, so a hand-written
+    /// "Timer" is never shadowed by the built-in one.
+    private static func installNewBuiltins(into macros: [Macro]) -> [Macro] {
+        let installed = UserDefaults.standard.integer(forKey: builtinsKey)
+        guard installed < builtinCount else { return macros }
+
+        let existing = Set(macros.map { PhraseMatcher.normalize($0.name) })
+        let missing = Macro.added.dropFirst(installed)
+            .filter { !existing.contains(PhraseMatcher.normalize($0.name)) }
+
+        UserDefaults.standard.set(builtinCount, forKey: builtinsKey)
+        guard !missing.isEmpty else { return macros }
+
+        let combined = macros + missing
+        save(combined)
+        return combined
     }
 
     static func save(_ macros: [Macro]) {
@@ -149,6 +346,7 @@ enum MacroStore {
     static func resetToDefaults() -> [Macro] {
         let seeded = Macro.seeded()
         save(seeded)
+        UserDefaults.standard.set(builtinCount, forKey: builtinsKey)
         return seeded
     }
 }

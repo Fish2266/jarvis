@@ -245,10 +245,49 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
         ])
     }
 
+    /// What the Target box holds for each action, or "" for the kinds that
+    /// don't have one. Also decides whether the box is editable at all, so
+    /// there is one answer rather than two lists that can drift apart.
+    static func targetLabel(for kind: ActionKind) -> String {
+        switch kind {
+        case .app:       return "App"
+        case .url:       return "URL"
+        case .search:    return "Engine"
+        case .reminder:  return "List"
+        case .weather, .forecast, .reminders, .agenda,
+             .timer, .volume, .media, .lock, .sleep:
+            return ""
+        }
+    }
+
     /// The guidance changes with the action, because the phrase means something
     /// different for a reminder than for an app.
     private func applyHint(for kind: ActionKind) {
         switch kind {
+        case .search:
+            hint.stringValue = "Phrases here are prefixes — say the phrase, then what you're "
+                + "looking for. Engine is the search URL the words are added to; leave it "
+                + "empty for Google, or paste another site's search URL to point this "
+                + "command at it. Put %s in the URL if the words don't go on the end."
+        case .timer:
+            hint.stringValue = "One timer at a time. Say a length to start it (\"set a timer "
+                + "for ten minutes\"), \"cancel the timer\" to stop it, or \"how long is left\" "
+                + "to check. Starting a second timer replaces the first."
+        case .volume:
+            hint.stringValue = "The words decide what happens: up, down, louder, quieter, "
+                + "mute, unmute, or a number — \"set the volume to forty\". Say nothing "
+                + "specific and it reports where the volume is now."
+        case .media:
+            hint.stringValue = "Sends the media key to whatever is playing — Music, Spotify, "
+                + "a video in a tab. \"Pause\" is a toggle, so it starts a paused track too. "
+                + "Needs Accessibility, the same grant the desktop gestures use."
+        case .reminders, .agenda:
+            hint.stringValue = "Reads out what's there — the first few, then how many more. "
+                + "Read-only: no command in Jarvis can delete a reminder or change an event."
+        case .lock:
+            hint.stringValue = "Say one of these phrases on its own and the screen locks. "
+                + "Matching is near-exact on purpose, so a sentence that merely contains "
+                + "\"lock\" won't fire it. This can only lock — never shut down or restart."
         case .sleep:
             hint.stringValue = "Say one of these phrases on its own and the Mac sleeps. "
                 + "Matching is near-exact on purpose, so an unrelated sentence containing "
@@ -281,15 +320,23 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
         } else {
             switch macro.kind {
             case .app: text = "App"
-            case .url:
+            case .url, .search:
+                let base = macro.kind == .url ? "Website" : "Search"
                 if let profile = Browser.profileName(for: macro.chromeProfile) {
-                    text = "Website · \(profile)"
+                    text = "\(base) · \(profile)"
                 } else {
-                    text = "Website"
+                    text = base
                 }
-            case .weather: text = "Weather"
-            case .reminder: text = "Reminder"
-            case .sleep: text = "Sleep"
+            case .weather:   text = "Weather"
+            case .forecast:  text = "Forecast"
+            case .reminder:  text = "Reminder"
+            case .reminders: text = "Reminders"
+            case .agenda:    text = "Calendar"
+            case .timer:     text = "Timer"
+            case .volume:    text = "Volume"
+            case .media:     text = "Playback"
+            case .lock:      text = "Lock"
+            case .sleep:     text = "Sleep"
             }
         }
         let field = NSTextField(labelWithString: text)
@@ -335,21 +382,18 @@ final class CommandsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
 
         rebuildProfilePopup(selecting: macro.chromeProfile)
 
-        let isURL = macro.kind == .url
-        targetView.isEditable = macro.kind != .weather && macro.kind != .sleep
+        // A profile only means anything for the kinds that open a page.
+        let opensAPage = macro.kind == .url || macro.kind == .search
+        // The label decides it: a kind with no Target label has no Target.
+        let targetLabel = Self.targetLabel(for: macro.kind)
+        targetView.isEditable = !targetLabel.isEmpty
         chooseButton.isEnabled = macro.kind == .app
         chooseButton.isHidden = macro.kind != .app
-        profilePopup.isEnabled = isURL && !profiles.isEmpty
-        profilePopup.isHidden = !isURL
-        profileLabel.isHidden = !isURL
+        profilePopup.isEnabled = opensAPage && !profiles.isEmpty
+        profilePopup.isHidden = !opensAPage
+        profileLabel.isHidden = !opensAPage
 
-        switch macro.kind {
-        case .app:      targetLabelText.stringValue = "App"
-        case .url:      targetLabelText.stringValue = "URL"
-        case .weather:  targetLabelText.stringValue = ""
-        case .reminder: targetLabelText.stringValue = "List"
-        case .sleep:    targetLabelText.stringValue = ""
-        }
+        targetLabelText.stringValue = targetLabel
         applyHint(for: macro.kind)
     }
 

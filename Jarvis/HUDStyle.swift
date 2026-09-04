@@ -63,6 +63,25 @@ enum HUD {
         return ctx.makeImage()
     }
 
+    /// The sample rate the microphone is actually running at.
+    ///
+    /// Set by the listener when it starts, so the readout in the corner of the
+    /// HUD can say the real number instead of a plausible one. Zero until then,
+    /// which the readout renders as a dash rather than as "0.0 kHz".
+    static var audioRate: Double = 0
+
+    /// Turns a high-passed RMS into something to draw with, 0…1.
+    ///
+    /// The curve matters more than the scale. Speech is mostly quiet with brief
+    /// loud peaks, and drawn linearly it sits flat on the floor and twitches
+    /// only on plosives — the same reason the answer strip's envelope is
+    /// curved. The ceiling is a little under the quietest clap threshold, so
+    /// talking fills the dot without a clap being the only thing that can.
+    static func voiceScale(_ rms: Float) -> CGFloat {
+        guard rms > 0 else { return 0 }
+        return CGFloat(min(1, powf(min(1, rms / 0.05), 0.6)))
+    }
+
     /// Applies contentsScale down the tree so vectors stay crisp on Retina.
     static func applyScale(_ scale: CGFloat, to layer: CALayer) {
         layer.contentsScale = scale

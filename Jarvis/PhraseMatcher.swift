@@ -60,62 +60,205 @@ enum PhraseMatcher {
         scoreNormalized(normalize(transcript), normalize(phrase))
     }
 
+    // MARK: - The text being matched against
+
+    /// A normalized transcript, split once.
+    ///
+    /// `Resolver.resolveFast` scores the same sentence against every phrase of
+    /// every command and then against every installed app — a hundred and forty
+    /// times over on this Mac. Splitting it into words, and each word into
+    /// characters, was being redone for each of them, twice: once by the window
+    /// walk and once by the coverage count.
+    ///
+    /// The characters are held as one flat array with a range per word, so a
+    /// window of consecutive words is a *slice* of it. That is what the window
+    /// walk actually wants, and it means the walk no longer builds anything:
+    /// it used to allocate and copy a fresh array for every window of every
+    /// phrase, which was the largest single cost in the resolver.
+    struct Haystack {
+        let text: String
+        /// The words rejoined by a single space. Identical to `text` for
+        /// normalized input, which is what every caller passes; built this way
+        /// so the ranges below are exact whatever arrives.
+        fileprivate let packed: [Character]
+        fileprivate let wordRanges: [Range<Int>]
+
+        var characters: Int { packed.count }
+        var wordCount: Int { wordRanges.count }
+        /// Read once. Every phrase compares its own length against this before
+        /// searching, so it is asked a hundred-odd times per transcript.
+        let utf8Count: Int
+
+        init(_ normalized: String) {
+            text = normalized
+            utf8Count = normalized.utf8.count
+            var characters: [Character] = []
+            characters.reserveCapacity(normalized.count)
+            var ranges: [Range<Int>] = []
+            for word in normalized.split(separator: " ") {
+                if !characters.isEmpty { characters.append(" ") }
+                let start = characters.count
+                characters.append(contentsOf: word)
+                ranges.append(start..<characters.count)
+            }
+            packed = characters
+            wordRanges = ranges
+        }
+
+        /// The words from `start` through `end`, inclusive, with the single
+        /// spaces between them — a slice, not a copy.
+        fileprivate func window(_ start: Int, _ end: Int) -> ArraySlice<Character> {
+            packed[wordRanges[start].lowerBound..<wordRanges[end].upperBound]
+        }
+
+        fileprivate func word(_ index: Int) -> ArraySlice<Character> {
+            packed[wordRanges[index]]
+        }
+    }
+
+    /// A normalized phrase, split once — the mirror of `Haystack`.
+    ///
+    /// `Haystack` fixed this for the transcript and left the other side of the
+    /// comparison alone. Every phrase was still being turned into an array of
+    /// characters *and* an array of arrays of characters on every partial
+    /// transcript: with a hundred-odd phrases that came to 100 µs a call, more
+    /// than half the cost of resolving anything, and all of it re-deriving
+    /// something that only changes when you edit your commands.
+    ///
+    /// Built once by `Resolver.Catalog` and reused for the life of the command
+    /// list. The `String` overloads below still build one per call, which is
+    /// what the old signature did anyway, so nothing that used them got slower.
+    struct Needle {
+        let text: String
+        let utf8Count: Int
+        fileprivate let characters: [Character]
+        fileprivate let words: [[Character]]
+
+        var isEmpty: Bool { text.isEmpty }
+
+        init(_ normalized: String) {
+            text = normalized
+            utf8Count = normalized.utf8.count
+            characters = Array(normalized)
+            words = normalized.split(separator: " ").map(Array.init)
+        }
+    }
+
     /// Like `scoreNormalized` but WITHOUT the containment shortcut, so "new"
     /// doesn't score 0.97 against "News" just for being a prefix of it.
     static func similarityNormalized(_ n: String, _ p: String) -> Double {
-        guard !n.isEmpty, !p.isEmpty else { return 0 }
-        if n == p { return 1.0 }
-        return max(bestWindowSimilarity(haystack: n, needle: p),
-                   tokenCoverage(haystack: n, needle: p) * 0.92)
+        similarity(Haystack(n), p, atLeast: 0)
+    }
+
+    /// The same, against a transcript that has already been split.
+    ///
+    /// `bar` is the score the caller would need to care about the answer: the
+    /// match threshold, or the best it has already found. Anything below that is
+    /// reported as some value below it rather than computed exactly, which is
+    /// what lets the edit distance give up early. Pass 0 for an exact answer.
+    static func similarity(_ h: Haystack, _ p: String, atLeast bar: Double) -> Double {
+        similarity(h, Needle(p), atLeast: bar)
+    }
+
+    static func similarity(_ h: Haystack, _ p: Needle, atLeast bar: Double) -> Double {
+        guard !h.text.isEmpty, !p.isEmpty else { return 0 }
+        if h.text == p.text { return 1.0 }
+        return max(bestWindowSimilarity(h, needle: p, atLeast: bar),
+                   tokenCoverage(h, needle: p, atLeast: bar / 0.92) * 0.92)
     }
 
     /// True when `needle`'s words appear as a run of whole words in `haystack`
     /// — "chrome" in "google chrome", but not "new" in "news".
     static func containsTokenRun(_ haystack: String, _ needle: String) -> Bool {
-        let hay = haystack.split(separator: " ").map(String.init)
-        let need = needle.split(separator: " ").map(String.init)
-        guard !need.isEmpty, need.count <= hay.count else { return false }
-        for start in 0...(hay.count - need.count) {
-            if zip(need, hay[start...]).allSatisfy({ $0 == $1 }) { return true }
+        containsTokenRun(Haystack(haystack), needle)
+    }
+
+    static func containsTokenRun(_ h: Haystack, _ needle: String) -> Bool {
+        containsTokenRun(h, Needle(needle))
+    }
+
+    static func containsTokenRun(_ h: Haystack, _ needle: Needle) -> Bool {
+        let need = needle.words
+        guard !need.isEmpty, need.count <= h.wordCount else { return false }
+        for start in 0...(h.wordCount - need.count) {
+            var matched = true
+            for offset in need.indices where !h.word(start + offset).elementsEqual(need[offset]) {
+                matched = false
+                break
+            }
+            if matched { return true }
         }
         return false
     }
 
     static func scoreNormalized(_ n: String, _ p: String) -> Double {
-        guard !n.isEmpty, !p.isEmpty else { return 0 }
-        if n == p { return 1.0 }
-        // Whole-phrase containment is as good as an exact hit for our purposes.
-        if n.contains(p) { return 0.97 }
+        scoreNormalized(Haystack(n), p, atLeast: 0)
+    }
 
-        let window = bestWindowSimilarity(haystack: n, needle: p)
+    static func scoreNormalized(_ h: Haystack, _ p: String, atLeast bar: Double) -> Double {
+        scoreNormalized(h, Needle(p), atLeast: bar)
+    }
+
+    static func scoreNormalized(_ h: Haystack, _ p: Needle, atLeast bar: Double) -> Double {
+        guard !h.text.isEmpty, !p.isEmpty else { return 0 }
+        if h.text == p.text { return 1.0 }
+        // Whole-phrase containment is as good as an exact hit for our purposes.
+        //
+        // Guarded by length first, and it is worth more than it looks. A
+        // substring is never longer in UTF-8 than the string it sits in, so a
+        // phrase longer than the transcript cannot possibly be contained in it
+        // — and `utf8.count` is a stored length rather than a walk. Most
+        // phrases are longer than "open chrome", so most of them now settle
+        // this in a comparison instead of a search.
+        if p.utf8Count <= h.utf8Count, h.text.contains(p.text) { return 0.97 }
+
+        let window = bestWindowSimilarity(h, needle: p, atLeast: bar)
         // Coverage is the looser signal, so it can't score as high on its own.
-        let coverage = tokenCoverage(haystack: n, needle: p) * 0.92
+        let coverage = tokenCoverage(h, needle: p, atLeast: bar / 0.92) * 0.92
         return max(window, coverage)
     }
 
     /// Slide a word-aligned window roughly the length of the phrase across the
     /// transcript and keep the best edit-distance similarity.
-    private static func bestWindowSimilarity(haystack: String, needle: String) -> Double {
-        // Characters rather than Strings: the window is rebuilt on every step of
-        // an O(words squared) walk, and as a String that meant a fresh Array()
-        // conversion and an O(n) .count each time round.
-        let words = haystack.split(separator: " ").map(Array.init)
-        let target = Array(needle)
-        guard !words.isEmpty else { return 0 }
+    private static func bestWindowSimilarity(_ h: Haystack, needle: Needle,
+                                             atLeast bar: Double) -> Double {
+        let target = needle.characters[...]
+        guard h.wordCount > 0, !target.isEmpty else { return 0 }
 
-        let floor = target.count / 2
+        // A window shorter than `bar` of the phrase can never reach it: an edit
+        // distance is never smaller than the difference in length. Raising the
+        // floor removes windows that could not have won, and never one that
+        // could. The ceiling is left where it was — the cutoff below makes an
+        // over-long window cost nothing anyway.
+        let floor = bar > 0
+            ? max(target.count / 2, Int((bar * Double(target.count)).rounded(.up)))
+            : target.count / 2
         let ceiling = Int(Double(target.count) * 1.4)
-        var window: [Character] = []
-        window.reserveCapacity(haystack.count)
+
+        // The longest window there is, is the whole transcript. If even that
+        // falls short of the floor, no window can clear the bar and the nested
+        // walk below would build every one of them to prove it — which for a
+        // rambling sentence is sixty-odd slices per phrase, for nothing.
+        guard h.characters >= floor else { return 0 }
 
         var best = 0.0
-        for start in words.indices {
-            window.removeAll(keepingCapacity: true)
-            for end in start..<words.count {
-                if !window.isEmpty { window.append(" ") }
-                window.append(contentsOf: words[end])
-                if window.count < floor { continue }
-                best = max(best, similarity(window, target))
+        for start in 0..<h.wordCount {
+            for end in start..<h.wordCount {
+                let window = h.window(start, end)
+                if window.count >= floor {
+                    // Nothing below the bar, or below what has already been
+                    // found, can change the answer — so the distance only has to
+                    // be exact while it is still small enough to matter.
+                    let longest = max(window.count, target.count)
+                    // The slack is for the boundary: a window that lands exactly
+                    // on the bar still counts, and `(1 - 0.72) * 25` comes out a
+                    // hair under seven in binary.
+                    let cutoff = Int((1 - max(bar, best)) * Double(longest) + 1e-9)
+                    let distance = levenshtein(window, target, limit: cutoff)
+                    if distance <= cutoff {
+                        best = max(best, 1.0 - Double(distance) / Double(longest))
+                    }
+                }
                 if window.count > ceiling { break }
             }
         }
@@ -124,21 +267,37 @@ enum PhraseMatcher {
 
     /// Fraction of the phrase's words that show up in the transcript, allowing
     /// one typo per word for words of four letters or more.
-    private static func tokenCoverage(haystack: String, needle: String) -> Double {
-        // Split to characters once, not once per (needle token, haystack token)
-        // pair as the Array() calls inside the loop used to.
-        let hay = haystack.split(separator: " ").map(Array.init)
-        let need = needle.split(separator: " ").map(Array.init)
+    private static func tokenCoverage(_ h: Haystack, needle: Needle,
+                                      atLeast bar: Double) -> Double {
+        let need = needle.words
         guard !need.isEmpty else { return 0 }
 
+        // The most misses that could still clear the bar. Once more than this
+        // many words are missing the answer cannot get there, whatever is left.
+        let allowedMisses = bar <= 0 ? need.count
+            : need.count - Int((bar * Double(need.count) - 1e-9).rounded(.up))
+
         var hits = 0
+        var misses = 0
         for token in need {
             let budget = token.count >= 4 ? 1 : 0
-            // An edit distance is never smaller than the difference in length,
-            // so a token the budget can't cover on length alone skips the matrix.
-            if hay.contains(where: { abs($0.count - token.count) <= budget
-                                     && levenshtein($0, token) <= budget }) {
+            var found = false
+            for index in 0..<h.wordCount {
+                let word = h.word(index)
+                // An edit distance is never smaller than the difference in
+                // length, so a word the budget can't cover on length alone
+                // skips the matrix.
+                guard abs(word.count - token.count) <= budget,
+                      levenshtein(word, token[...], limit: budget) <= budget
+                else { continue }
+                found = true
+                break
+            }
+            if found {
                 hits += 1
+            } else {
+                misses += 1
+                if misses > allowedMisses { return Double(hits) / Double(need.count) }
             }
         }
         return Double(hits) / Double(need.count)
@@ -153,34 +312,58 @@ enum PhraseMatcher {
         if spoken == expected { return true }
         guard expected.count >= 4, abs(spoken.count - expected.count) <= 1
         else { return false }
-        return levenshtein(Array(spoken), Array(expected)) <= 1
-    }
-
-    private static func similarity(_ a: [Character], _ b: [Character]) -> Double {
-        let longest = max(a.count, b.count)
-        guard longest > 0 else { return 1 }
-        return 1.0 - Double(levenshtein(a, b)) / Double(longest)
+        return levenshtein(Array(spoken)[...], Array(expected)[...], limit: 1) <= 1
     }
 
     static func editDistance(_ a: String, _ b: String) -> Int {
-        levenshtein(Array(a), Array(b))
+        levenshtein(Array(a)[...], Array(b)[...], limit: max(a.count, b.count))
     }
 
-    private static func levenshtein(_ a: [Character], _ b: [Character]) -> Int {
-        if a.isEmpty { return b.count }
-        if b.isEmpty { return a.count }
+    /// Levenshtein distance, exact up to `limit` and reported as `limit + 1`
+    /// beyond it.
+    ///
+    /// The caller always has a score it would need to beat, and a score is
+    /// `1 - distance / length` — so every comparison comes with a distance
+    /// past which the answer stops mattering. Only the diagonal band that
+    /// could still land inside it is filled in, and a row whose cheapest cell
+    /// has already exceeded the limit ends the walk: two strings with nothing
+    /// in common now cost a row or two rather than the whole matrix.
+    private static func levenshtein(_ a: ArraySlice<Character>, _ b: ArraySlice<Character>,
+                                    limit: Int) -> Int {
+        let over = limit + 1
+        if limit < 0 { return over }
+        if a.isEmpty { return min(b.count, over) }
+        if b.isEmpty { return min(a.count, over) }
+        if abs(a.count - b.count) > limit { return over }
 
-        var prev = Array(0...b.count)
-        var cur = [Int](repeating: 0, count: b.count + 1)
+        let m = b.count
+        let aBase = a.startIndex
+        let bBase = b.startIndex
+        var prev = [Int](repeating: over, count: m + 2)
+        var cur = [Int](repeating: over, count: m + 2)
+        for j in 0...min(m, limit) { prev[j] = j }
 
         for i in 1...a.count {
-            cur[0] = i
-            for j in 1...b.count {
-                let cost = a[i - 1] == b[j - 1] ? 0 : 1
-                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            let low = max(1, i - limit)
+            let high = min(m, i + limit)
+            if low > high { return over }
+            // The cell to the left of the band, and the one past its right end,
+            // are read by this row and the next: neither is filled in by the
+            // walk itself, so both are pinned out of reach here.
+            cur[low - 1] = low == 1 ? i : over
+            var rowBest = over
+            let ai = a[aBase + i - 1]
+            for j in low...high {
+                let cost = ai == b[bBase + j - 1] ? 0 : 1
+                let step = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+                let value = min(step, over)
+                cur[j] = value
+                if value < rowBest { rowBest = value }
             }
+            cur[high + 1] = over
+            if rowBest > limit { return over }
             swap(&prev, &cur)
         }
-        return prev[b.count]
+        return min(prev[m], over)
     }
 }

@@ -57,6 +57,17 @@ final class HUDOverlay {
         views.forEach { $0.setStatus(text) }
     }
 
+    /// The microphone level while a phrase is being spoken.
+    ///
+    /// Called about twenty-four times a second for the few seconds the window
+    /// is open, and never otherwise — the engine only asks for levels while it
+    /// is armed. `isShowing` is checked first so a level arriving in the gap
+    /// after the HUD has gone costs an array read and nothing more.
+    func setLevel(_ rms: Float) {
+        guard !views.isEmpty else { return }
+        views.forEach { $0.setLevel(rms) }
+    }
+
     /// Escape pressed.
     func cancel() {
         guard isShowing else { return }
@@ -91,6 +102,10 @@ final class HUDOverlay {
         teardown()
         tearingDown = false
 
+        // Read once for all displays. Building a view is what draws them, and
+        // the battery is a hundred microseconds a look.
+        let readouts = HUDView.readoutLines()
+
         for screen in NSScreen.screens {
             let window = NSWindow(contentRect: screen.frame, styleMask: .borderless,
                                   backing: .buffered, defer: false)
@@ -103,7 +118,8 @@ final class HUDOverlay {
             window.collectionBehavior = [.canJoinAllSpaces, .stationary,
                                          .fullScreenAuxiliary, .ignoresCycle]
 
-            let view = HUDView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            let view = HUDView(frame: NSRect(origin: .zero, size: screen.frame.size),
+                               readouts: readouts)
             view.onFinished = { [weak self] in self?.teardown() }
             window.contentView = view
 

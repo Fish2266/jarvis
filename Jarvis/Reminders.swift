@@ -51,11 +51,14 @@ enum Reminders {
     /// "September 3rd at 10am to brush my teeth" both give the same result. The
     /// longest date match wins, and connector words left dangling at either end
     /// ("to", "at", "on") are trimmed off.
+    /// Built once. `NSDataDetector` compiles a good deal of machinery on
+    /// creation, and it has no state to carry between uses.
+    private static let dateDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.date.rawValue)
+
     static func parse(_ text: String) -> (title: String, due: Date?) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let detector = try? NSDataDetector(
-                types: NSTextCheckingResult.CheckingType.date.rawValue)
+        guard !trimmed.isEmpty, let detector = dateDetector
         else { return (trimmed, nil) }
 
         // NSDataDetector handles "September 3rd at 10am" and "tomorrow at 5pm",

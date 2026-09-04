@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 
 struct ChromeProfile: Equatable {
     /// The on-disk directory name Chrome uses: "Default", "Profile 1", …
@@ -210,19 +211,7 @@ enum Browser {
 
     /// Every open Chrome window, by its own id.
     private static func windowIDs() -> Set<Int> {
-        let source = """
-        set out to ""
-        with timeout of 3 seconds
-            tell application "Google Chrome"
-                if not running then return ""
-                repeat with w in windows
-                    set out to out & (id of w) & linefeed
-                end repeat
-            end tell
-        end timeout
-        return out
-        """
-        guard let raw = runScript(source) else { return [] }
+        guard let raw = run("windowids") else { return [] }
         return Set(raw.split(separator: "\n").compactMap { Int($0) })
     }
 
@@ -230,45 +219,13 @@ enum Browser {
     /// happens inside Chrome so only the window id has to come back.
     private static func window(showing email: String) -> Int? {
         guard !email.isEmpty else { return nil }
-        let source = """
-        with timeout of 3 seconds
-            tell application "Google Chrome"
-                if not running then return ""
-                repeat with w in windows
-                    repeat with t in tabs of w
-                        if (title of t) contains "\(escapeForAppleScript(email))" then
-                            return (id of w) as text
-                        end if
-                    end repeat
-                end repeat
-            end tell
-        end timeout
-        return ""
-        """
-        guard let raw = runScript(source) else { return nil }
+        guard let raw = run("windowshowing", email) else { return nil }
         return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Brings one Chrome window to the front by its own id.
     private static func focusWindow(_ id: Int) -> Bool {
-        let source = """
-        with timeout of 3 seconds
-            tell application "Google Chrome"
-                if not running then return "NONE"
-                repeat with w in windows
-                    -- Chrome hands back an id that never compares equal to a
-                    -- bare number; without the coercion this matches nothing.
-                    if ((id of w) as text) is "\(id)" then
-                        set index of w to 1
-                        activate
-                        return "OK"
-                    end if
-                end repeat
-            end tell
-        end timeout
-        return "NONE"
-        """
-        return runScript(source) == "OK"
+        run("focuswindow", String(id)) == "OK"
     }
 
     // MARK: - A fresh tab or window
@@ -288,33 +245,8 @@ enum Browser {
     /// permission. Any failure — refused, slow, no Chrome — reports false so
     /// the caller can fall back to simply opening the browser.
     static func openFresh(_ what: Fresh, completion: @escaping (Bool) -> Void) {
-        let body: String
-        switch what {
-        case .window:
-            body = "make new window"
-        case .tab:
-            // There has to be a window before it can hold a tab.
-            body = """
-            if (count of windows) is 0 then
-                        make new window
-                    else
-                        make new tab at end of tabs of front window
-                    end if
-            """
-        }
-
-        let source = """
-        with timeout of 5 seconds
-            tell application "Google Chrome"
-                activate
-                \(body)
-            end tell
-        end timeout
-        return "OK"
-        """
-
         scriptQueue.async {
-            let made = runScript(source) == "OK"
+            let made = run("makefresh", what.rawValue) == "OK"
             DispatchQueue.main.async { completion(made) }
         }
     }
@@ -344,13 +276,250 @@ enum Browser {
             .hasPrefix(wantedPath)
     }
 
-    private static func runScript(_ source: String) -> String? {
-        guard let script = NSAppleScript(source: source) else { return nil }
+    // MARK: - Talking to Chrome
+
+    /// Every script Jarvis sends Chrome, as handlers of one document.
+    ///
+    /// They live together and take their varying parts as arguments for two
+    /// reasons. Compiling an AppleScript costs **26 ms** — measured — and the
+    /// old arrangement built a fresh source string per call, so a single
+    /// "open gmail" spent 52 ms compiling before it had said a word to Chrome.
+    /// One document, compiled once, is free from the second command on.
+    ///
+    /// The other reason is that arguments are *data*. Window ids, URLs and
+    /// account addresses used to be interpolated into source text and escaped
+    /// by hand; a quote or a backslash in a URL either broke the script or
+    /// changed what it said. Nothing is quoted now, so nothing can be.
+    private static let chromeScript = """
+    on splitby(t, sep)
+        set saved to AppleScript's text item delimiters
+        set AppleScript's text item delimiters to sep
+        set parts to text items of t
+        set AppleScript's text item delimiters to saved
+        return parts
+    end splitby
+
+    -- A tab title arrives as one field of a tab-separated line, so anything
+    -- that would end the line or the field early has to go.
+    on scrub(t)
+        set saved to AppleScript's text item delimiters
+        repeat with bad in {linefeed, return, character id 9}
+            set AppleScript's text item delimiters to bad
+            set parts to text items of t
+            set AppleScript's text item delimiters to " "
+            set t to parts as text
+        end repeat
+        set AppleScript's text item delimiters to saved
+        return t
+    end scrub
+
+    on windowids()
+        set out to ""
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return ""
+                repeat with w in windows
+                    set out to out & (id of w) & linefeed
+                end repeat
+            end tell
+        end timeout
+        return out
+    end windowids
+
+    on windowshowing(theEmail)
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return ""
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if (title of t) contains theEmail then
+                            return (id of w) as text
+                        end if
+                    end repeat
+                end repeat
+            end tell
+        end timeout
+        return ""
+    end windowshowing
+
+    on focuswindow(wantedID)
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return "NONE"
+                repeat with w in windows
+                    -- Chrome hands back an id that never compares equal to a
+                    -- bare number; without the coercion this matches nothing.
+                    if ((id of w) as text) is wantedID then
+                        set index of w to 1
+                        activate
+                        return "OK"
+                    end if
+                end repeat
+            end tell
+        end timeout
+        return "NONE"
+    end focuswindow
+
+    on makefresh(what)
+        with timeout of 5 seconds
+            tell application "Google Chrome"
+                activate
+                if what is "window" then
+                    make new window
+                else
+                    -- There has to be a window before it can hold a tab.
+                    if (count of windows) is 0 then
+                        make new window
+                    else
+                        make new tab at end of tabs of front window
+                    end if
+                end if
+            end tell
+        end timeout
+        return "OK"
+    end makefresh
+
+    on findtabs(joinedPrefixes)
+        set TB to character id 9
+        set wanted to my splitby(joinedPrefixes, TB)
+        set out to ""
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return ""
+                -- Capped on purpose: Chrome answers slowly once a lot of
+                -- windows are open, and the one you mean is a recent one.
+                set wc to count of windows
+                if wc > 6 then set wc to 6
+                repeat with wi from 1 to wc
+                    set w to window wi
+                    set wid to id of w
+                    set urls to URL of tabs of w
+                    set names to title of tabs of w
+                    repeat with ti from 1 to count of urls
+                        set u to item ti of urls
+                        repeat with p in wanted
+                            if u starts with (contents of p) then
+                                set nm to ""
+                                if ti ≤ (count of names) then set nm to item ti of names
+                                set out to out & wid & TB & ti & TB & u & TB & my scrub(nm) & linefeed
+                                exit repeat
+                            end if
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+        end timeout
+        return out
+    end findtabs
+
+    on focustab(wantedID, wantedURL)
+        with timeout of 3 seconds
+            tell application "Google Chrome"
+                if not running then return "NONE"
+                repeat with wi from 1 to count of windows
+                    set w to window wi
+                    if ((id of w) as text) is wantedID then
+                        set urls to URL of tabs of w
+                        repeat with ti from 1 to count of urls
+                            if (item ti of urls) is wantedURL then
+                                set active tab index of w to ti
+                                set index of w to 1
+                                activate
+                                return "OK"
+                            end if
+                        end repeat
+                    end if
+                end repeat
+            end tell
+        end timeout
+        return "NONE"
+    end focustab
+    """
+
+    /// Compiled once, on first use. Touched only on `scriptQueue`, which is
+    /// serial — `NSAppleScript` is not safe to use from two threads at once.
+    nonisolated(unsafe) private static var compiledScript: NSAppleScript?
+    /// Set when compilation failed, so a broken script isn't recompiled on
+    /// every command for the rest of the session.
+    nonisolated(unsafe) private static var compileFailed = false
+
+    /// Calls one handler of `chromeScript`. Returns nil for any failure —
+    /// Automation refused, Chrome slow, no Chrome — so every caller falls back
+    /// to doing it the ordinary way.
+    @discardableResult
+    private static func run(_ handler: String, _ arguments: String...) -> String? {
+        guard let script = chromeScriptIfCompiled() else { return nil }
+        return call(script, handler: handler, arguments: arguments)
+    }
+
+    /// Calls one handler of an already-compiled script.
+    ///
+    /// Internal rather than private so a test can drive it against a script
+    /// that touches nothing, and prove the arguments arrive and the answer
+    /// comes back — without Chrome, and without Automation permission.
+    static func call(_ script: NSAppleScript, handler: String,
+                     arguments: [String]) -> String? {
         var error: NSDictionary?
-        let result = script.executeAndReturnError(&error)
+        let result = script.executeAppleEvent(handlerEvent(handler, arguments), error: &error)
         if error != nil { return nil }
         return result.stringValue
     }
+
+    /// Compiles a script, or nil if it isn't valid AppleScript.
+    static func compile(_ source: String) -> NSAppleScript? {
+        guard let script = NSAppleScript(source: source) else { return nil }
+        var error: NSDictionary?
+        return script.compileAndReturnError(&error) ? script : nil
+    }
+
+    private static func chromeScriptIfCompiled() -> NSAppleScript? {
+        if let compiledScript { return compiledScript }
+        guard !compileFailed else { return nil }
+        guard let script = compile(chromeScript) else {
+            compileFailed = true
+            return nil
+        }
+        compiledScript = script
+        return script
+    }
+
+    /// The handlers `chromeScript` is expected to define, so a test can prove
+    /// every one of them is reachable by the name the Swift side calls it by.
+    static let chromeHandlers = ["windowids", "windowshowing", "focuswindow",
+                                 "makefresh", "findtabs", "focustab"]
+
+    /// An event that calls `handler` with `arguments`, all passed as text.
+    ///
+    /// The handler name goes in lowercased: AppleScript identifiers are
+    /// case-insensitive and the subroutine event carries the folded form, so a
+    /// name sent with capitals in it finds nothing.
+    private static func handlerEvent(_ handler: String,
+                                     _ arguments: [String]) -> NSAppleEventDescriptor {
+        var psn = ProcessSerialNumber(highLongOfPSN: 0, lowLongOfPSN: UInt32(kCurrentProcess))
+        let target = NSAppleEventDescriptor(
+            descriptorType: typeProcessSerialNumber,
+            bytes: &psn, length: MemoryLayout<ProcessSerialNumber>.size)!
+
+        let event = NSAppleEventDescriptor(
+            eventClass: AEEventClass(kASAppleScriptSuite),
+            eventID: AEEventID(kASSubroutineEvent),
+            targetDescriptor: target,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID))
+        event.setDescriptor(NSAppleEventDescriptor(string: handler.lowercased()),
+                            forKeyword: AEKeyword(keyASSubroutineName))
+
+        let list = NSAppleEventDescriptor.list()
+        for (index, argument) in arguments.enumerated() {
+            list.insert(NSAppleEventDescriptor(string: argument), at: index + 1)
+        }
+        event.setDescriptor(list, forKeyword: AEKeyword(keyDirectObject))
+        return event
+    }
+
+    /// Compiles the script without sending Chrome anything, so a test can prove
+    /// it is valid AppleScript without needing Automation permission or Chrome.
+    static func chromeScriptCompiles() -> Bool { chromeScriptIfCompiled() != nil }
 
     /// URL prefixes that should count as "this page is already open".
     static func matchPrefixes(for urlString: String) -> [String] {
@@ -366,11 +535,6 @@ enum Browser {
             }
         }
         return prefixes
-    }
-
-    private static func escapeForAppleScript(_ text: String) -> String {
-        text.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
     /// A tab that already has the wanted page open.
@@ -434,54 +598,9 @@ enum Browser {
     private static func openTabs(matching urlString: String) -> [OpenTab] {
         let prefixes = matchPrefixes(for: urlString)
         guard !prefixes.isEmpty else { return [] }
-        let list = prefixes.map { "\"\(escapeForAppleScript($0))\"" }.joined(separator: ", ")
-
-        // `tab` is a Chrome class, so the tab character has to come in under
-        // another name or the tell block reads it as the class.
-        let source = """
-        on scrub(t)
-            set saved to AppleScript's text item delimiters
-            repeat with bad in {linefeed, return, character id 9}
-                set AppleScript's text item delimiters to bad
-                set parts to text items of t
-                set AppleScript's text item delimiters to " "
-                set t to parts as text
-            end repeat
-            set AppleScript's text item delimiters to saved
-            return t
-        end scrub
-
-        set TB to character id 9
-        set wanted to {\(list)}
-        set out to ""
-        with timeout of 3 seconds
-            tell application "Google Chrome"
-                if not running then return ""
-                set wc to count of windows
-                if wc > 6 then set wc to 6
-                repeat with wi from 1 to wc
-                    set w to window wi
-                    set wid to id of w
-                    set urls to URL of tabs of w
-                    set names to title of tabs of w
-                    repeat with ti from 1 to count of urls
-                        set u to item ti of urls
-                        repeat with p in wanted
-                            if u starts with p then
-                                set nm to ""
-                                if ti ≤ (count of names) then set nm to item ti of names
-                                set out to out & wid & TB & ti & TB & u & TB & my scrub(nm) & linefeed
-                                exit repeat
-                            end if
-                        end repeat
-                    end repeat
-                end repeat
-            end tell
-        end timeout
-        return out
-        """
-
-        return parseTabs(runScript(source) ?? "")
+        // One argument, split back into a list inside the script, so the
+        // compiled form never has to change and can be reused.
+        return parseTabs(run("findtabs", prefixes.joined(separator: "\t")) ?? "")
     }
 
     /// One tab per line: window id, tab index, URL, title. Anything malformed is
@@ -502,31 +621,7 @@ enum Browser {
     /// by URL. Both survive the user reordering windows or tabs in between; the
     /// index we listed it under would not.
     private static func focus(_ tab: OpenTab) -> Bool {
-        let source = """
-        with timeout of 3 seconds
-            tell application "Google Chrome"
-                if not running then return "NONE"
-                repeat with wi from 1 to count of windows
-                    set w to window wi
-                    -- Chrome hands back an id that never compares equal to a bare
-                    -- number; without the coercion this loop silently matches nothing.
-                    if ((id of w) as text) is "\(tab.windowID)" then
-                        set urls to URL of tabs of w
-                        repeat with ti from 1 to count of urls
-                            if (item ti of urls) is "\(escapeForAppleScript(tab.url))" then
-                                set active tab index of w to ti
-                                set index of w to 1
-                                activate
-                                return "OK"
-                            end if
-                        end repeat
-                    end if
-                end repeat
-            end tell
-        end timeout
-        return "NONE"
-        """
-        return runScript(source) == "OK"
+        run("focustab", String(tab.windowID), tab.url) == "OK"
     }
 
     /// Brings an already-open tab for this URL to the front.

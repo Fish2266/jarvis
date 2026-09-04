@@ -1,7 +1,8 @@
 import AppKit
+import AVFoundation
+import EventKit
 import ServiceManagement
 import Speech
-import AVFoundation
 
 final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
@@ -57,10 +58,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self, selector: #selector(previewHUD),
             name: Notification.Name("com.connorchristopherson.Jarvis.previewHUD"), object: nil)
 
-        if VoiceBox.onlyCompactVoicesInstalled && !Prefs.voiceNudgeShown {
-            Prefs.voiceNudgeShown = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                self?.getVoices()
+        // Reading the installed-voice list costs 119 ms — measured — so it is
+        // read once, off the main thread, and kept. Launch used to spend that
+        // inline just to decide whether to show the nudge below.
+        VoiceBox.warmVoices()
+        if !Prefs.voiceNudgeShown {
+            DispatchQueue.global(qos: .utility).async {
+                guard VoiceBox.onlyCompactVoicesInstalled else { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard !Prefs.voiceNudgeShown else { return }
+                    Prefs.voiceNudgeShown = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.getVoices() }
+                }
             }
         }
 
@@ -133,6 +142,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
+        // The voice list is served from a cache. macOS announces a change to
+        // it, but a re-read in the background costs this menu nothing and means
+        // a voice that finished downloading shows up on the next open even if
+        // the announcement never came.
+        VoiceBox.refreshVoicesInBackground()
+
+        // Read once and reused below: the permission notices at the bottom both
+        // need to know which actions you actually use.
+        let commands = MacroStore.load()
+
         let status = NSMenuItem(title: statusLine(engine.state), action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
@@ -142,6 +161,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                    action: nil, keyEquivalent: "")
             heard.isEnabled = false
             menu.addItem(heard)
+        }
+
+        // Only while one is running. A timer outlives the phrase that set it,
+        // so the menu is the one place you can always see it and call it off
+        // without saying anything.
+        if let running = Countdown.shared.running {
+            menu.addItem(.separator())
+            let left = NSMenuItem(title: "Timer — \(Countdown.clock(running.remaining)) left",
+                                  action: nil, keyEquivalent: "")
+            left.isEnabled = false
+            menu.addItem(left)
+            add(menu, "Cancel the timer", #selector(cancelTimer))
         }
 
         menu.addItem(.separator())
@@ -320,9 +351,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Prefs.gestures, HandTracker.authorization == .denied {
             add(menu, "Camera is off — open Settings", #selector(openCameraSettings))
         }
-        if Prefs.gestures, HandTracker.authorized, !Spaces.canSwitchDesktops {
-            add(menu, "Desktop switching needs Accessibility — grant it",
+        // Accessibility covers two unrelated features, so the line says which
+        // of them is actually going without — naming both when only one is
+        // configured sends you looking for a problem you don't have.
+        if !Spaces.canSwitchDesktops, let needs = accessibilityNeeds(commands) {
+            add(menu, "\(needs) needs Accessibility — grant it",
                 #selector(openAccessibilitySettings))
+        }
+        if commands.contains(where: { $0.enabled && $0.kind == .agenda }),
+           EKEventStore.authorizationStatus(for: .event) == .denied {
+            add(menu, "Calendar is off — open Settings", #selector(openCalendarSettings))
         }
 
         menu.addItem(.separator())
@@ -443,6 +481,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// What is currently going without Accessibility, phrased for the menu.
+    ///
+    /// `commands` is passed in because the menu already has the list — reading
+    /// it again would mean decoding your saved commands from disk a second and
+    /// third time on every menu open.
+    private func accessibilityNeeds(_ commands: [Macro]) -> String? {
+        let swipes = Prefs.gestures && HandTracker.authorized
+        let playback = commands.contains { $0.enabled && $0.kind == .media }
+        switch (swipes, playback) {
+        case (true, true):   return "Desktop switching and playback control"
+        case (true, false):  return "Desktop switching"
+        case (false, true):  return "Playback control"
+        case (false, false): return nil
+        }
+    }
+
     /// Why the trigger shortcut isn't bound, if it isn't.
     private func triggerNote() -> String? {
         guard Prefs.enabled else { return "Jarvis is paused — other apps have it back" }
@@ -478,7 +532,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleHUD() {
         Prefs.showHUD.toggle()
-        if !Prefs.showHUD { HUDOverlay.shared.dismissNow() }
+        guard Prefs.showHUD else {
+            HUDOverlay.shared.dismissNow()
+            // The timer pill is on-screen furniture too, and it outlives the
+            // phrase that made it — so turning the HUD off with a timer running
+            // used to leave a pill behind with nothing to take it away.
+            TimerBar.shared.dismiss()
+            return
+        }
+        // Turning it back on brings a running timer's pill with it, rather than
+        // waiting for the timer to end or be replaced.
+        if let running = Countdown.shared.running { TimerBar.shared.show(running) }
     }
 
     @objc func showCommands() {
@@ -558,6 +622,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         HUDOverlay.shared.preview(reply: Intelligence.cannedReplies.randomElement() ?? "Welcome home, sir.")
     }
 
+    @objc private func cancelTimer() {
+        guard Countdown.shared.cancel() else { return }
+        TimerBar.shared.dismiss()
+    }
+
+    @objc private func openCalendarSettings() { openSettings("Privacy_Calendars") }
     @objc private func openMicSettings() { openSettings("Privacy_Microphone") }
     @objc private func openSpeechSettings() { openSettings("Privacy_SpeechRecognition") }
     @objc private func openCameraSettings() { openSettings("Privacy_Camera") }

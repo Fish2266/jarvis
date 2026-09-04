@@ -10,6 +10,17 @@ final class AppIndex {
         let name: String        // "Google Chrome"
         let normalized: String  // "google chrome"
         let path: String
+        /// The name, split for matching. Every spoken target is scored against
+        /// every app here, and splitting a hundred names into words and
+        /// characters on each partial transcript was most of what that cost.
+        let haystack: PhraseMatcher.Haystack
+
+        init(name: String, normalized: String, path: String) {
+            self.name = name
+            self.normalized = normalized
+            self.path = path
+            self.haystack = PhraseMatcher.Haystack(normalized)
+        }
     }
 
     private(set) var entries: [Entry] = []
@@ -46,6 +57,11 @@ final class AppIndex {
             found[key] = Entry(name: display, normalized: key, path: path)
         }
 
+        // Deliberately the path API, and deliberately without skipping hidden
+        // entries. Enumerating URLs with `.isDirectoryKey` prefetched, to save
+        // the `stat` per entry, was measured at the same 15 ms — and skipping
+        // hidden entries lost /Applications/Safari.app, which carries the
+        // hidden flag on macOS 26. No gain, and it dropped a real app.
         for root in Self.searchRoots {
             guard let items = try? fm.contentsOfDirectory(atPath: root) else { continue }
             for item in items {
@@ -97,19 +113,28 @@ final class AppIndex {
     /// Best app whose name matches `target`, above `threshold`.
     func best(matching target: String, threshold: Double) -> (Entry, Double)? {
         guard !target.isEmpty else { return nil }
+        // Split once for all hundred entries, not once per entry. The apps
+        // already keep a prepared `Haystack`; the spoken target was still being
+        // taken apart afresh for every one of them.
+        let needle = PhraseMatcher.Needle(target)
         var winner: (Entry, Double)?
         for entry in entries {
             let score: Double
             if entry.normalized == target {
                 score = 1.0
-            } else if PhraseMatcher.containsTokenRun(entry.normalized, target) {
+            } else if PhraseMatcher.containsTokenRun(entry.haystack, needle) {
                 // "chrome" finds "Google Chrome".
                 score = 0.95
             } else {
                 // Forward direction only. Scoring the other way lets a one-typo
                 // budget match "News" against "new"; the "chrome" -> "Google
                 // Chrome" case that needed it is handled by containsTokenRun.
-                score = PhraseMatcher.similarityNormalized(entry.normalized, target)
+                //
+                // Nothing under the threshold, or under the best found so far,
+                // can win — so the comparison is told what it would have to beat
+                // and stops as soon as it can't.
+                score = PhraseMatcher.similarity(entry.haystack, needle,
+                                                 atLeast: max(threshold, winner?.1 ?? 0))
             }
             if score >= threshold, score > (winner?.1 ?? 0) {
                 winner = (entry, score)

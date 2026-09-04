@@ -16,6 +16,8 @@ struct Resolution {
     /// You asked for it to come to you ("bring over xcode") rather than to be
     /// taken to it, so its windows move to the desktop you're on.
     var bringHere: Bool = false
+    /// You asked for it to stop ("quit chrome") rather than to start.
+    var quitTarget: Bool = false
     /// "open a new tab" / "open a new window" — a fresh tab or window in the
     /// browser rather than just bringing it forward. Only set for a command
     /// that opens the browser itself; a website command uses `forceNewTab`.
@@ -45,6 +47,20 @@ enum Resolver {
     static let bringVerbs = [
         "bring over", "bring here", "bring me", "move over", "move here",
         "send over", "send here", "pull over", "drag over", "bring", "gimme",
+    ]
+
+    /// Verbs that end an app rather than start one.
+    ///
+    /// Deliberately short, and deliberately without "shut down" or "power
+    /// off": those belong to the sentence about the *Mac*, and the one thing
+    /// worse than a command that doesn't work is one that works on the wrong
+    /// noun. "quit chrome" ends Chrome; nothing here can end anything else.
+    ///
+    /// `terminate` is the polite request an app gets from ⌘Q, so unsaved work
+    /// still gets its "do you want to save?" — this asks an app to stop, it
+    /// does not kill it.
+    static let quitVerbs = [
+        "force quit", "quit out of", "quit", "close down", "close", "kill",
     ]
 
     /// Direction words that can trail the target instead of leading it, as in
@@ -108,31 +124,38 @@ enum Resolver {
         return text
     }
 
-    /// Strips a leading "jarvis" and a leading verb, returning what's left and
-    /// whether the verb was one that asks the app to come here.
+    /// Strips a leading "jarvis" and a leading verb, returning what's left,
+    /// whether the verb was one that asks the app to come here, and whether it
+    /// was one that asks the app to stop.
     static func strip(_ normalized: String)
-        -> (target: String, sawVerb: Bool, bringHere: Bool) {
+        -> (target: String, sawVerb: Bool, bringHere: Bool, quitHere: Bool) {
         let text = withoutAssistantName(normalized)
 
-        // Longest match across both lists rather than first-listed, so a verb
-        // that is a prefix of another can't shadow it from either direction.
+        // Longest match across all three lists rather than first-listed, so a
+        // verb that is a prefix of another can't shadow it from any direction.
         var matched = ""
         var bring = false
+        var quit = false
         for verb in verbs
         where verb.count > matched.count && (text == verb || text.hasPrefix(verb + " ")) {
             matched = verb
-            bring = false
+            (bring, quit) = (false, false)
         }
         for verb in bringVerbs
         where verb.count > matched.count && (text == verb || text.hasPrefix(verb + " ")) {
             matched = verb
-            bring = true
+            (bring, quit) = (true, false)
         }
-        guard !matched.isEmpty else { return (text, false, false) }
+        for verb in quitVerbs
+        where verb.count > matched.count && (text == verb || text.hasPrefix(verb + " ")) {
+            matched = verb
+            (bring, quit) = (false, true)
+        }
+        guard !matched.isEmpty else { return (text, false, false, false) }
 
         var rest = String(text.dropFirst(matched.count)).trimmingCharacters(in: .whitespaces)
-        if bring { rest = dropBringTail(rest) }
-        return (rest, true, bring)
+        if bring || quit { rest = dropBringTail(rest) }
+        return (rest, true, bring, quit)
     }
 
     /// "bring xcode over here" -> "xcode". Never strips the last word standing,
@@ -234,7 +257,50 @@ enum Resolver {
         return found
     }
 
+    /// Your commands, with every phrase normalized and split once.
+    ///
+    /// The transcript side of the comparison has been prepared this way since
+    /// `Haystack`; the phrase side never was, so a hundred-odd phrases were
+    /// being re-normalized and re-split on *every partial transcript* — a few
+    /// dozen times per spoken sentence. Measured at 100 µs a call, which was
+    /// more than half of what resolving a command cost.
+    ///
+    /// Held by the listener and rebuilt only when the commands change, which is
+    /// when the answer could actually differ.
+    struct Catalog {
+        struct Command {
+            let macro: Macro
+            /// Normalized, split, and empty phrases already dropped.
+            let phrases: [PhraseMatcher.Needle]
+        }
+
+        let macros: [Macro]
+        /// Only the commands the fuzzy loop can reach. The capture and
+        /// exact-phrase kinds are matched by other means entirely, so
+        /// preparing their phrases would be work for nobody.
+        let fuzzy: [Command]
+
+        init(_ macros: [Macro]) {
+            self.macros = macros
+            fuzzy = macros
+                .filter { $0.enabled && !$0.kind.capturesText && !$0.kind.requiresExactPhrase }
+                .map { macro in
+                    Command(macro: macro, phrases: macro.phrases
+                        .map { PhraseMatcher.Needle(PhraseMatcher.normalize($0)) }
+                        .filter { !$0.isEmpty })
+                }
+        }
+    }
+
+    /// Convenience for callers with no catalog to hand — the editor's "Try it
+    /// now", the tests. Identical in every respect but the preparation, which
+    /// it pays for inline exactly as this used to on every call.
     static func resolveFast(transcript: String, macros: [Macro]) -> Resolution? {
+        resolveFast(transcript: transcript, catalog: Catalog(macros))
+    }
+
+    static func resolveFast(transcript: String, catalog: Catalog) -> Resolution? {
+        let macros = catalog.macros
         let raw = PhraseMatcher.normalize(transcript)
         guard !raw.isEmpty else { return nil }
 
@@ -249,7 +315,7 @@ enum Resolver {
 
         let (whole, spokenProfile) = stripProfileQualifier(raw, profiles: Browser.chromeProfiles())
         let spoken = withoutAssistantName(whole)
-        let (rawTarget, sawVerb, bringHere) = strip(whole)
+        let (rawTarget, sawVerb, bringHere, quitHere) = strip(whole)
         let (target, forceNewTab) = stripNewQualifier(rawTarget, macros: macros)
 
         // Exact-phrase commands get their own pass. They must not be reachable
@@ -276,23 +342,29 @@ enum Resolver {
 
         var best: Resolution?
 
-        for macro in macros
-        where macro.enabled && !macro.kind.capturesText && !macro.kind.requiresExactPhrase {
+        // Split once, then scored against every phrase of every command. Both
+        // forms are needed: a phrase can be a whole catchphrase ("wake up
+        // daddys home") or just the target that follows a verb ("the craft").
+        let wholeHay = PhraseMatcher.Haystack(whole)
+        let targetHay = target.isEmpty ? nil : PhraseMatcher.Haystack(target)
+
+        for command in catalog.fuzzy {
             var score = 0.0
-            for phrase in macro.phrases {
-                let p = PhraseMatcher.normalize(phrase)
-                guard !p.isEmpty else { continue }
-                // A phrase can be a whole catchphrase ("wake up daddys home")
-                // or just the target that follows a verb ("the craft").
-                score = max(score, PhraseMatcher.scoreNormalized(whole, p))
-                if !target.isEmpty {
-                    score = max(score, PhraseMatcher.scoreNormalized(target, p))
+            for p in command.phrases {
+                // Nothing under the threshold, or under the best already found,
+                // can win — and a phrase told what it has to beat stops
+                // measuring as soon as it can't get there.
+                let bar = max(macroThreshold, best?.confidence ?? 0, score)
+                score = max(score, PhraseMatcher.scoreNormalized(wholeHay, p, atLeast: bar))
+                if let targetHay {
+                    score = max(score, PhraseMatcher.scoreNormalized(
+                        targetHay, p, atLeast: max(bar, score)))
                 }
             }
             if score >= macroThreshold, score > (best?.confidence ?? 0) {
-                best = Resolution(macro: macro, confidence: score, source: .macro,
+                best = Resolution(macro: command.macro, confidence: score, source: .macro,
                                   chromeProfile: spokenProfile, forceNewTab: forceNewTab,
-                                  bringHere: bringHere)
+                                  bringHere: bringHere, quitTarget: quitHere)
             }
         }
         if var best {
@@ -312,7 +384,7 @@ enum Resolver {
                           kind: .app, target: entry.path)
         return Resolution(macro: macro, confidence: score, source: .appIndex,
                           chromeProfile: spokenProfile, forceNewTab: forceNewTab,
-                          bringHere: bringHere)
+                          bringHere: bringHere, quitTarget: quitHere)
     }
 
     /// Candidate list handed to the model when Tier 1 finds nothing.
@@ -333,11 +405,18 @@ enum Resolver {
         guard !n.isEmpty, n != "none", n.count >= 2 else { return nil }
 
         var best: Resolution?
+        let named = PhraseMatcher.Haystack(n)
         for macro in macros where macro.enabled && !macro.kind.requiresExactPhrase {
-            var score = PhraseMatcher.scoreNormalized(PhraseMatcher.normalize(macro.name), n)
-            score = max(score, PhraseMatcher.scoreNormalized(n, PhraseMatcher.normalize(macro.name)))
+            let bar = max(macroThreshold, best?.confidence ?? 0)
+            let macroName = PhraseMatcher.normalize(macro.name)
+            var score = PhraseMatcher.scoreNormalized(
+                PhraseMatcher.Haystack(macroName), n, atLeast: bar)
+            score = max(score, PhraseMatcher.scoreNormalized(
+                named, macroName, atLeast: max(bar, score)))
             for phrase in macro.phrases {
-                score = max(score, PhraseMatcher.scoreNormalized(PhraseMatcher.normalize(phrase), n))
+                score = max(score, PhraseMatcher.scoreNormalized(
+                    PhraseMatcher.Haystack(PhraseMatcher.normalize(phrase)), n,
+                    atLeast: max(bar, score)))
             }
             if score >= macroThreshold, score > (best?.confidence ?? 0) {
                 best = Resolution(macro: macro, confidence: score, source: .model)

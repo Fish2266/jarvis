@@ -137,11 +137,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Jarvis asks Google Chrome whether a page is already open, so it can switch to that tab instead of opening another copy.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Jarvis reads out what is on your calendar today when you ask. It never adds, changes or deletes an event.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "After a double clap, Jarvis watches for a few seconds to see whether you gesture at it. The camera is off at every other time.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Jarvis uses your location only to look up the current weather when you ask for it.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Jarvis listens for a double clap and the command you say after it.";
-				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Jarvis adds items to your Reminders when you ask it to remind you about something.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Jarvis adds items to your Reminders when you ask it to remind you about something, and reads back what is outstanding when you ask what is on your list.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "After a double clap, Jarvis transcribes a few seconds of audio to work out which command you asked for.";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.connorchristopherson.Jarvis;
@@ -164,11 +165,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Jarvis asks Google Chrome whether a page is already open, so it can switch to that tab instead of opening another copy.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Jarvis reads out what is on your calendar today when you ask. It never adds, changes or deletes an event.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "After a double clap, Jarvis watches for a few seconds to see whether you gesture at it. The camera is off at every other time.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Jarvis uses your location only to look up the current weather when you ask for it.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Jarvis listens for a double clap and the command you say after it.";
-				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Jarvis adds items to your Reminders when you ask it to remind you about something.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Jarvis adds items to your Reminders when you ask it to remind you about something, and reads back what is outstanding when you ask what is on your list.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "After a double clap, Jarvis transcribes a few seconds of audio to work out which command you asked for.";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.connorchristopherson.Jarvis;

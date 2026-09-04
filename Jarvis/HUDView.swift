@@ -38,9 +38,20 @@ final class HUDView: NSView {
     private var diameter: CGFloat = 520
     private var dismissWork: DispatchWorkItem?
 
+    /// What the corner readouts should say. Passed in rather than read here so
+    /// a Mac with three displays reads its battery once, not three times.
+    private let readoutValues: [String]?
+
+    /// The dot at the centre, kept so the microphone level can drive it.
+    private var core: CAShapeLayer?
+    /// Smoothed level, 0…1. Fast attack, slow release — the same shaping the
+    /// answer strip's bars use, and for the same reason: raw frames strobe.
+    private var voice: CGFloat = 0
+
     // MARK: - Setup
 
-    override init(frame frameRect: NSRect) {
+    init(frame frameRect: NSRect, readouts: [String]? = nil) {
+        readoutValues = readouts
         super.init(frame: frameRect)
         layer = root
         wantsLayer = true
@@ -113,7 +124,9 @@ final class HUDView: NSView {
         HUD.glow(countdown, color: HUD.cyan, radius: 13)
 
         reticle.addSublayer(crosshair(r: r))
-        reticle.addSublayer(coreDot(r: r))
+        let dot = coreDot(r: r)
+        core = dot
+        reticle.addSublayer(dot)
 
         // Sweep ---------------------------------------------------------------
         sweep.bounds = reticle.bounds
@@ -332,13 +345,43 @@ final class HUDView: NSView {
         }
     }
 
+    /// The four corner readouts.
+    ///
+    /// Three of these used to be decoration — a hard-coded "AUD 48.0 kHz" on a
+    /// Mac running at 44.1, and a "SYS 100%" that meant nothing at all. They
+    /// are instruments now: the real input rate, the real battery, the real
+    /// clock. It costs about a tenth of a millisecond to build the strings, and
+    /// a panel that tells you the truth is worth more than one that looks like
+    /// it might.
+    ///
+    /// "MK VII" stays exactly as it was. It was never claiming to be a
+    /// measurement.
+    static func readoutLines(now: Date = Date()) -> [String] {
+        let rate = HUD.audioRate > 0
+            ? String(format: "AUD %.1f kHz", HUD.audioRate / 1000)
+            : "AUD —"
+
+        var right = "LNK \(SystemInfo.localAddress() == nil ? "○" : "●")"
+        if let battery = SystemInfo.battery() {
+            right += "  BAT \(battery.percent)%\(battery.charging ? " +" : "")"
+        } else {
+            right += "  AC POWER"
+        }
+        return ["MK VII",
+                now.formatted(date: .omitted, time: .shortened).uppercased(),
+                rate,
+                right]
+    }
+
     private func buildReadouts() {
-        let lines = [
-            ("MK VII", CGPoint(x: 74, y: bounds.height - 92), CATextLayerAlignmentMode.left),
-            ("SIG LOCK", CGPoint(x: bounds.width - 274, y: bounds.height - 92), .right),
-            ("AUD 48.0 kHz", CGPoint(x: 74, y: 74), .left),
-            ("LNK ●  SYS 100%", CGPoint(x: bounds.width - 274, y: 74), .right),
+        let values = readoutValues ?? Self.readoutLines()
+        let positions: [(CGPoint, CATextLayerAlignmentMode)] = [
+            (CGPoint(x: 74, y: bounds.height - 92), .left),
+            (CGPoint(x: bounds.width - 274, y: bounds.height - 92), .right),
+            (CGPoint(x: 74, y: 74), .left),
+            (CGPoint(x: bounds.width - 274, y: 74), .right),
         ]
+        let lines = zip(values, positions).map { ($0, $1.0, $1.1) }
         for (text, origin, alignment) in lines {
             let layer = HUD.label(size: 11, weight: .medium)
             layer.alignmentMode = alignment
@@ -411,6 +454,7 @@ final class HUDView: NSView {
     func confirm(headline text: String, detail detailText: String) {
         dismissWork?.cancel()
         countdown.removeAnimation(forKey: "countdown")
+        settleLevel()
 
         // Snap the countdown ring closed and turn the accents gold.
         CATransaction.begin()
@@ -461,6 +505,43 @@ final class HUDView: NSView {
         scheduleDismiss(after: 2.6, duration: 0.55, expand: true)
     }
 
+    /// The microphone level, while it's listening.
+    ///
+    /// The dot at the centre swells with your voice. It is the one honest
+    /// signal the HUD can give that it is *hearing* you without showing what it
+    /// thinks you said — which stays the rule: the headline is what Jarvis is
+    /// doing, never the transcript. A reticle that sat perfectly still for six
+    /// seconds gave you no way to tell "listening" from "not working".
+    ///
+    /// Two layer writes per frame, at the twenty-four frames a second the
+    /// detector reports, for the few seconds a phrase lasts. Actions are
+    /// disabled or Core Animation would add an implicit quarter-second fade to
+    /// each one and the dot would lag the voice by a syllable.
+    func setLevel(_ rms: Float) {
+        guard let core else { return }
+        let target = HUD.voiceScale(rms)
+        voice = target > voice ? target : voice * 0.82 + target * 0.18
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let scale = 1 + voice * 0.55
+        core.transform = CATransform3DMakeScale(scale, scale, 1)
+        core.shadowOpacity = Float(0.45 + voice * 0.55)
+        CATransaction.commit()
+    }
+
+    /// Puts the dot back to rest, so a confirmed command doesn't freeze it
+    /// mid-syllable at whatever size the last word left it.
+    private func settleLevel() {
+        guard let core else { return }
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.3)
+        core.transform = CATransform3DIdentity
+        core.shadowOpacity = 0.6
+        CATransaction.commit()
+        voice = 0
+    }
+
     /// Swap the headline after the fact — used when a result arrives, e.g. the
     /// weather replacing "Checking the weather".
     func setHeadline(_ text: String) {
@@ -479,6 +560,7 @@ final class HUDView: NSView {
     func handOff() {
         dismissWork?.cancel()
         countdown.removeAnimation(forKey: "countdown")
+        settleLevel()
         setStatus("ANSWER", color: HUD.gold)
         scheduleDismiss(after: 0.12, duration: 0.45, expand: true)
     }
@@ -498,6 +580,7 @@ final class HUDView: NSView {
     func cancel() {
         dismissWork?.cancel()
         countdown.removeAnimation(forKey: "countdown")
+        settleLevel()
         setText(status, "CANCELLED", size: 15, weight: .medium, color: HUD.amber, kern: 4)
         status.shadowColor = HUD.amber
         setText(headline, "", size: 34, weight: .bold, color: HUD.white, kern: 4)
@@ -508,6 +591,7 @@ final class HUDView: NSView {
     func standDown() {
         dismissWork?.cancel()
         countdown.removeAnimation(forKey: "countdown")
+        settleLevel()
         setText(status, "STANDING DOWN", size: 15, weight: .medium, color: HUD.amber, kern: 4)
         status.shadowColor = HUD.amber
         flicker(status, delay: 0)

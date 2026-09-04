@@ -16,20 +16,81 @@ private struct Line {
 
 /// Wrapper around Apple's on-device model.
 ///
-/// Two jobs, both optional — the app works with this entirely switched off:
+/// Three jobs, all optional — the app works with this entirely switched off:
 ///   1. Interpreting a command the deterministic resolver couldn't place.
 ///   2. Writing the spoken reply, after the action has already happened.
+///   3. Answering something said that was a question rather than a command.
 ///
-/// Neither ever blocks opening an app.
+/// None of them ever blocks opening an app.
 final class Intelligence {
 
     static let shared = Intelligence()
     private init() {}
 
-    /// Kept alive only to hold the model in memory; requests use fresh sessions
-    /// so no transcript history accumulates between commands.
-    private var warmSession: LanguageModelSession?
+    /// A warm session waiting for each job.
+    ///
+    /// A session is created *with* its instructions, and creating one is what
+    /// makes the model read them. Requests used to build a fresh session at the
+    /// moment they were needed, so every call paid for that inline — the
+    /// prewarmed session held the model in memory and nothing else, and the
+    /// instructions were re-read from cold each time.
+    ///
+    /// These are handed over rather than shared: `take` removes the session
+    /// from the pool and `replenish` puts a new one in its place, so no request
+    /// ever sees another's transcript and no two ever hold the same session.
+    private var warm: [Job: LanguageModelSession] = [:]
+    private var filling: Set<Job> = []
+    /// `warm` is reached from main, from the prewarm queue and from whatever
+    /// executor an async request lands on.
+    private var warmLock = os_unfair_lock()
     private var lastPrewarm = Date.distantPast
+
+    /// The three things the model is ever asked to do, each with its own
+    /// standing instructions.
+    private enum Job: CaseIterable {
+        case resolve, reply, answer
+
+        var instructions: String {
+            switch self {
+            case .resolve: return Intelligence.resolverInstructions
+            case .reply:   return Intelligence.jarvisInstructions
+            case .answer:  return Intelligence.answerInstructions
+            }
+        }
+    }
+
+    /// The session waiting for this job, or a fresh one if none is.
+    private func take(_ job: Job) -> LanguageModelSession {
+        os_unfair_lock_lock(&warmLock)
+        let ready = warm.removeValue(forKey: job)
+        os_unfair_lock_unlock(&warmLock)
+        // A warm session that is somehow still answering isn't ours to use.
+        if let ready, !ready.isResponding { return ready }
+        return LanguageModelSession(instructions: job.instructions)
+    }
+
+    /// Builds the next one, off whatever thread the request finished on.
+    private func replenish(_ job: Job) {
+        os_unfair_lock_lock(&warmLock)
+        let needed = warm[job] == nil && !filling.contains(job)
+        if needed { filling.insert(job) }
+        os_unfair_lock_unlock(&warmLock)
+        guard needed else { return }
+
+        queue.async { [weak self] in
+            guard let self else { return }
+            var session: LanguageModelSession?
+            if self.isAvailable {
+                let fresh = LanguageModelSession(instructions: job.instructions)
+                fresh.prewarm()
+                session = fresh
+            }
+            os_unfair_lock_lock(&self.warmLock)
+            self.filling.remove(job)
+            if let session { self.warm[job] = session }
+            os_unfair_lock_unlock(&self.warmLock)
+        }
+    }
 
     /// Session setup blocks for over a second the first time, so it never runs
     /// on the main thread — that delay used to hold up the HUD.
@@ -77,16 +138,14 @@ final class Intelligence {
 
     /// Called on the double clap. Cold start costs seconds; warm calls cost
     /// ~300 ms, so we spend the listening window loading the model.
+    ///
+    /// All three jobs, not just the interpreter: the spoken reply runs after
+    /// *every* command and so is the one asked for most often, and it used to
+    /// be prewarmed not at all.
     func prewarm() {
         guard Date().timeIntervalSince(lastPrewarm) > 20 else { return }
         lastPrewarm = Date()
-        queue.async { [weak self] in
-            guard let self, self.isAvailable else { return }
-            if self.warmSession == nil {
-                self.warmSession = LanguageModelSession(instructions: Self.resolverInstructions)
-            }
-            self.warmSession?.prewarm()
-        }
+        for job in Job.allCases { replenish(job) }
     }
 
     // MARK: - Tier 2: interpreting a command
@@ -113,8 +172,9 @@ final class Intelligence {
         let list = commands.isEmpty ? "(none defined)" : commands.joined(separator: ", ")
         let prompt = "Their commands: \(list)\n\nSpoken: \"\(transcript)\""
 
+        let session = take(.resolve)
+        defer { replenish(.resolve) }
         let result = await Self.withTimeout(timeout) { () -> String in
-            let session = LanguageModelSession(instructions: Self.resolverInstructions)
             let response = try await session.respond(
                 to: prompt, generating: Target.self,
                 options: GenerationOptions(temperature: 0.0, maximumResponseTokens: 16))
@@ -167,8 +227,9 @@ final class Intelligence {
         var prompt = "ACTION: \(action)."
         if !heard.isEmpty { prompt += " HEARD: \"\(heard)\"" }
 
+        let session = take(.reply)
+        defer { replenish(.reply) }
         let result = await Self.withTimeout(timeout) { () -> String in
-            let session = LanguageModelSession(instructions: Self.jarvisInstructions)
             let response = try await session.respond(
                 to: prompt, generating: Line.self,
                 options: GenerationOptions(temperature: 1.1, maximumResponseTokens: 32))
@@ -272,8 +333,9 @@ final class Intelligence {
         let prompt = "For reference, right now it is \(now).\n\nThe user said: "
             + question + Self.framing(for: question)
 
+        let session = take(.answer)
+        defer { replenish(.answer) }
         let result = await Self.withTimeout(timeout) { () -> String in
-            let session = LanguageModelSession(instructions: Self.answerInstructions)
             let response = try await session.respond(
                 to: prompt,
                 options: GenerationOptions(temperature: 0.7, maximumResponseTokens: 70))

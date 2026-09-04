@@ -29,7 +29,15 @@ final class ListenerEngine {
     private let hands = HandTracker()
 
     private(set) var state: ListenerState = .off {
-        didSet { if state != oldValue { onState?(state) } }
+        didSet {
+            if state != oldValue { onState?(state) }
+            // Derived here rather than read from `state` on the audio thread.
+            // `ListenerState` carries a String in one case, so reading it from
+            // another thread is a genuine race; a Bool written from main and
+            // read from the tap is the same bargain `wantsLevels` already makes,
+            // and one place to get right instead of the eight that end a phrase.
+            hudLevels = (state == .armed) && Prefs.showHUD
+        }
     }
 
     var onState: ((ListenerState) -> Void)?
@@ -42,6 +50,10 @@ final class ListenerEngine {
     /// hour on a laptop that is otherwise doing nothing — cheap in CPU, not
     /// free in battery, and this app is meant to run all day.
     var wantsLevels = false
+    /// Whether the reticle wants the microphone level. True only for the few
+    /// seconds a phrase is being spoken, so the idle cost is exactly zero —
+    /// which is the whole reason it isn't simply always on.
+    private var hudLevels = false
     var onLog: ((String) -> Void)?
     var onTranscript: ((String) -> Void)?
     /// Set only while the Clap Monitor is on screen, same bargain as `wantsLevels`.
@@ -76,7 +88,15 @@ final class ListenerEngine {
     /// by way of the camera reporting itself ready again.
     private var watchStarted = false
 
-    private var macros: [Macro] = MacroStore.load()
+    private var macros: [Macro] = MacroStore.load() {
+        didSet { catalog = Resolver.Catalog(macros) }
+    }
+    /// The same commands with their phrases already normalized and split.
+    ///
+    /// Rebuilt only when the commands change. Tier 1 runs once per partial
+    /// transcript — a few dozen times a sentence — and preparing the phrases
+    /// there was more than half of what it cost.
+    private var catalog: Resolver.Catalog
     private var lastHeard = ""
     /// Fires once dictation has stopped changing, for commands that capture text.
     private var settleWork: DispatchWorkItem?
@@ -85,6 +105,12 @@ final class ListenerEngine {
     /// Shorter pause for ordinary commands. Any command can still grow — "open
     /// chrome" becomes "open chrome on work" — so none of them fire on sight.
     private let commandSettle: TimeInterval = 0.6
+    /// The pause before a phrase the resolver couldn't place goes to the model.
+    ///
+    /// Longer than `commandSettle` on purpose: nothing has parsed yet, and a
+    /// sentence half said looks exactly like a sentence that means nothing. Far
+    /// shorter than what it replaced, which was the whole six-second window.
+    private let unmatchedSettle: TimeInterval = 1.0
     private var didFire = false
     /// Bumped on every arm and cancel so late async work can tell it's stale.
     private var runID = 0
@@ -92,6 +118,9 @@ final class ListenerEngine {
     private var macrosObserver: NSObjectProtocol?
 
     init() {
+        // Not a property initializer: that would read the stored commands a
+        // second time, and `didSet` does not fire during initialization anyway.
+        catalog = Resolver.Catalog(macros)
         detector.config = Prefs.sensitivity.config
         wireDetector()
         wireSpeech()
@@ -106,7 +135,38 @@ final class ListenerEngine {
             }
 
         EscapeHotKey.shared.onPress = { [weak self] in self?.cancel() }
+        wireCountdown()
         AppIndex.shared.ensureLoaded()
+    }
+
+    /// The timer's display and its alarm.
+    ///
+    /// Deliberately not part of a phrase's lifecycle: a timer outlives the
+    /// command that set it by minutes, so Escape, a new double clap and the
+    /// HUD coming and going must all leave it alone. Only `Countdown` decides
+    /// when it starts and stops.
+    private func wireCountdown() {
+        Countdown.shared.onChange = { running in
+            guard let running, Prefs.showHUD else {
+                TimerBar.shared.dismiss()
+                return
+            }
+            TimerBar.shared.show(running)
+        }
+        Countdown.shared.onFire = { [weak self] in
+            guard let self else { return }
+            self.log("timer finished")
+            TimerBar.shared.ring()
+            self.chime(.triggered)
+            let line = "Your timer is up, sir."
+            if Prefs.showHUD, !TimerBar.shared.isShowing {
+                // The pill is the notification when it's on screen. With the
+                // HUD off, or the pill already gone, the strip says it instead
+                // — a timer that finishes silently is a timer you didn't set.
+                AnswerBar.shared.show(line)
+            }
+            if Prefs.speakReply { VoiceBox.shared.speak(line) }
+        }
     }
 
     deinit {
@@ -119,8 +179,17 @@ final class ListenerEngine {
             // Read from the audio thread, written from main. A Bool is a single
             // byte and cannot tear; the worst case is one stale frame, which
             // costs a meter update nobody was looking at.
-            guard let self, self.wantsLevels else { return }
-            DispatchQueue.main.async { self.onLevel?(rms, bg) }
+            guard let self else { return }
+            let meter = self.wantsLevels
+            let reticle = self.hudLevels
+            guard meter || reticle else { return }
+            DispatchQueue.main.async {
+                if meter { self.onLevel?(rms, bg) }
+                // The reticle breathes with your voice while it listens, so the
+                // HUD shows it is hearing you without ever showing the words —
+                // which stays the promise: what it's *doing*, never what you said.
+                if reticle { HUDOverlay.shared.setLevel(rms) }
+            }
         }
         detector.onClap = { [weak self] index in
             DispatchQueue.main.async {
@@ -201,13 +270,23 @@ final class ListenerEngine {
             if !text.isEmpty { self.hands.mute(for: self.speechGrace) }
             self.onTranscript?(text)
 
-            guard let resolution = Resolver.resolveFast(transcript: text, macros: self.macros)
+            guard let resolution = Resolver.resolveFast(transcript: text, catalog: self.catalog)
             else {
                 // Not a command — but it may be a question still being asked.
                 if Prefs.answerQuestions, Questions.looksLikeQuestion(text) {
                     self.speech.extend(to: self.dictationSettle + 6)
                     self.scheduleSettle(after: self.dictationSettle)
+                    return
                 }
+                // Nor a question, and there is still the model to try. It used
+                // to wait here for the whole six-second window to run out
+                // before anything happened, so every phrase the resolver
+                // couldn't place — which is precisely what tier 2 exists for —
+                // sat silent for six seconds and *then* started thinking.
+                //
+                // What you have said when you stop talking is what gets
+                // interpreted, the same as everywhere else.
+                self.scheduleSettle(after: self.unmatchedSettle)
                 return
             }
 
@@ -302,6 +381,9 @@ final class ListenerEngine {
         engine.prepare()
         do {
             try engine.start()
+            // So the HUD's corner readout can say the real rate rather than a
+            // hard-coded one that happens to be wrong on half the Macs there are.
+            HUD.audioRate = format.sampleRate
             state = .listening
             log("listening on \(inputDeviceName()) @ \(Int(format.sampleRate)) Hz")
         } catch {
@@ -350,44 +432,77 @@ final class ListenerEngine {
     func arm() { handleDoubleClap() }
 
     private func handleDoubleClap() {
-        guard state == .listening else { return }
+        // A clap while something is already in flight interrupts it rather than
+        // being ignored. This used to insist on `.listening`, and `execute`
+        // parks the state in `.triggered` for 3.4 seconds after every command —
+        // so for those 3.4 seconds Jarvis was deaf to the one gesture that
+        // wakes it, which is exactly when you are most likely to clap again.
+        switch state {
+        case .listening, .armed, .watching, .thinking, .triggered:
+            break
+        case .off, .noPermission, .failed:
+            return
+        }
         log("double clap")
 
         guard SpeechListener.authorization == .authorized else {
             log("speech recognition isn't authorized — opening the first command instead")
-            if let macro = macros.first(where: \.enabled) {
-                // Reset here too: `execute` refuses to fire while `didFire` is
-                // set, and the reset below is past this early return — so
-                // without this, this fallback worked exactly once per launch.
-                runID += 1
-                didFire = false
-                execute(Resolution(macro: macro, confidence: 1, source: .macro), heard: "")
-            }
+            // Nothing to run means nothing to interrupt: bailing out after
+            // tearing the last command down would leave the state machine
+            // parked wherever it was, with the timer that resets it already
+            // made stale.
+            guard let macro = macros.first(where: \.enabled) else { return }
+            interrupt()
+            // Reset here too: `execute` refuses to fire while `didFire` is set,
+            // and the reset below is past this early return — so without this,
+            // this fallback worked exactly once per launch.
+            runID += 1
+            didFire = false
+            execute(Resolution(macro: macro, confidence: 1, source: .macro), heard: "")
             return
         }
+
+        if state != .listening { interrupt() }
 
         runID += 1
         didFire = false
         lastHeard = ""
         state = .armed
-        chime(.armed)
+
+        // The microphone first, before anything that draws.
+        //
+        // Nothing is buffered from before the clap — that is the promise the
+        // whole feature rests on — so a word said in the moment between the
+        // clap and the recogniser opening is simply gone. Building the reticle
+        // first put the full-screen window and its layer tree in that gap, and
+        // people do not wait politely for a HUD before speaking. Starting the
+        // recogniser costs the reticle a couple of milliseconds and buys back
+        // the front of every quickly-spoken command.
+        speech.start(timeout: phraseWindow, vocabulary: recognitionVocabulary())
+        EscapeHotKey.shared.register()
 
         startWatching()
+        chime(.armed)
 
         if Prefs.showHUD {
             HUDOverlay.shared.beginListening(seconds: watching ? gestureWindow : phraseWindow)
         }
-        EscapeHotKey.shared.register()
         log(EscapeHotKey.shared.isRegistered
             ? "escape armed — press Esc to cancel"
             : "warning: couldn't register the Escape hotkey")
 
-        speech.start(timeout: phraseWindow, vocabulary: recognitionVocabulary())
-
         // Warmup last, and off the main thread. Spending the listening window
         // loading the model means tier 2 is warm if tier 1 misses.
         if Prefs.useModel { Intelligence.shared.prewarm() }
+        // Likewise the speech chain: connecting the graph and starting the
+        // engine costs 37 ms, and it used to land on the first reply of the
+        // session, between the line being written and it being heard.
+        if Prefs.speakReply { VoiceBox.shared.prewarm() }
         Weather.shared.requestAuthorizationIfNeeded()
+        // The city table the "what time is it in Tokyo" answer needs. Once per
+        // launch, in the background, and only if questions are being answered
+        // at all.
+        if Prefs.answerQuestions { Questions.warm() }
         // Anything installed since launch becomes reachable by name. Off the
         // main thread, and at most once every few minutes.
         AppIndex.shared.refreshIfStale(after: AppIndex.staleAfter)
@@ -422,7 +537,7 @@ final class ListenerEngine {
     private func resolveAndAct(_ text: String) {
         guard state == .armed || state == .thinking, !didFire else { return }
 
-        if let resolution = Resolver.resolveFast(transcript: text, macros: macros) {
+        if let resolution = Resolver.resolveFast(transcript: text, catalog: catalog) {
             execute(resolution, heard: text)
             return
         }
@@ -455,11 +570,26 @@ final class ListenerEngine {
 
         // Some questions have an exact answer already — no need to ask, and no
         // chance of the model inventing one.
-        if let known = Questions.localAnswer(for: question) {
+        let names = macros.filter(\.enabled).map(\.name)
+        if let known = Questions.localAnswer(for: question, commands: names) {
             log("answer (local): \(known)")
-            if Prefs.showHUD { HUDOverlay.shared.setAnswer(known) }
-            if Prefs.speakReply { VoiceBox.shared.speak(known) }
-            state = engine.isRunning ? .listening : .off
+            deliverAnswer(known, id: id)
+            return
+        }
+
+        // Exact, but not instant — free disk space costs ten milliseconds to
+        // read, which is a dropped frame of the HUD if it happens here. The
+        // work goes to a background queue and the answer comes back.
+        if let slow = Questions.deferredAnswer(for: question) {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let answer = slow()
+                DispatchQueue.main.async {
+                    guard let self, id == self.runID else { return }
+                    let spoken = answer ?? "I couldn't work that out, sir."
+                    self.log("answer (local): \(spoken)")
+                    self.deliverAnswer(spoken, id: id)
+                }
+            }
             return
         }
 
@@ -468,10 +598,18 @@ final class ListenerEngine {
             guard id == self.runID else { return }
             let spoken = reply ?? "I haven't an answer for that, sir."
             self.log("answer: \(spoken)")
-            if Prefs.showHUD { HUDOverlay.shared.setAnswer(spoken) }
-            if Prefs.speakReply { VoiceBox.shared.speak(spoken) }
-            self.state = self.engine.isRunning ? .listening : .off
+            self.deliverAnswer(spoken, id: id)
         }
+    }
+
+    /// Puts an answer on the strip and says it, then hands the state machine
+    /// back. One place, because every answer — local, deferred or from the
+    /// model — has to leave the engine in exactly the same condition.
+    private func deliverAnswer(_ text: String, id: Int) {
+        guard id == runID else { return }
+        if Prefs.showHUD { HUDOverlay.shared.setAnswer(text) }
+        if Prefs.speakReply { VoiceBox.shared.speak(text) }
+        state = engine.isRunning ? .listening : .off
     }
 
     /// Tier 2 — only reached when the deterministic resolver found nothing.
@@ -483,6 +621,12 @@ final class ListenerEngine {
         }
 
         let id = runID
+        // Whatever the recogniser has is what the model is being asked about,
+        // so the microphone can be let go now rather than running out its
+        // window in the background. The camera stays: a phrase the resolver
+        // couldn't place is exactly the case gestures exist for.
+        settleWork?.cancel()
+        speech.stop(deliverEnd: false)
         state = .thinking
         if Prefs.showHUD { HUDOverlay.shared.setStatus("INTERPRETING") }
         log("no direct match for \"\(text)\" — asking the model")
@@ -526,6 +670,23 @@ final class ListenerEngine {
         EscapeHotKey.shared.unregister()
         if Prefs.showHUD { HUDOverlay.shared.standDown() }
         state = engine.isRunning ? .listening : .off
+    }
+
+    /// Abandons whatever is in flight so a new phrase can start on clean state.
+    ///
+    /// Everything `cancel` does bar putting the HUD away, because the phrase
+    /// that called this is about to put its own up. Bumping `runID` is what
+    /// makes the in-flight model call, settle timer and spoken reply land stale.
+    private func interrupt() {
+        runID += 1
+        didFire = true
+        settleWork?.cancel()
+        EscapeHotKey.shared.unregister()
+        speech.stop(deliverEnd: false)
+        stopWatching()
+        VoiceBox.shared.stop()
+        AnswerBar.shared.dismiss()
+        detector.resetSequence()
     }
 
     /// Escape pressed — abandon everything in flight.
@@ -618,7 +779,10 @@ final class ListenerEngine {
                 + " — clap first to actually run it")
             return
         }
-        guard state == .armed || state == .watching || state == .triggered else { return }
+        // `.thinking` included: the model being consulted is precisely the case
+        // the camera is there for, and a hand should not have to wait for it.
+        guard state == .armed || state == .watching
+                || state == .thinking || state == .triggered else { return }
 
         // Stop listening. `didFire` shuts every voice path — the settle timer,
         // a late `onEnd`, an in-flight model call — and bumping `runID` makes
@@ -728,11 +892,16 @@ final class ListenerEngine {
 
         // "bring over xcode" is a different action from "open xcode", and the
         // HUD and the spoken line should both say so.
+        let quitting = resolution.quitTarget && macro.kind.canBeQuit
         let label: String
-        if resolution.bringHere && macro.kind.canBeBrought {
+        if quitting {
+            label = "Quitting \(macro.name)"
+        } else if resolution.bringHere && macro.kind.canBeBrought {
             label = "Bringing \(macro.name) over"
         } else if let fresh {
             label = fresh == .tab ? "New tab" : "New window"
+        } else if macro.kind == .search, let query = resolution.payload {
+            label = WebSearch.headline(for: query)
         } else {
             label = macro.actionLabel
         }
@@ -743,9 +912,9 @@ final class ListenerEngine {
         if Prefs.showHUD { HUDOverlay.shared.confirm(headline: label) }
 
         // The action runs now. Everything below this line is decoration.
-        perform(macro, payload: resolution.payload,
+        perform(macro, payload: resolution.payload, heard: heard,
                 forceNewTab: resolution.forceNewTab,
-                bringHere: resolution.bringHere,
+                bringHere: resolution.bringHere, quitTarget: quitting,
                 browserFresh: fresh, id: id) { [weak self] extra in
             guard let self, id == self.runID else { return }
             guard !macro.kind.handlesOwnReply else { return }
@@ -759,12 +928,27 @@ final class ListenerEngine {
     }
 
     /// `completion` carries any result worth mentioning in the spoken line.
-    private func perform(_ macro: Macro, payload: String?, forceNewTab: Bool = false,
-                         bringHere: Bool = false,
+    ///
+    /// `heard` is the sentence as spoken. Most actions ignore it — they were
+    /// resolved from it and need nothing more — but the three that read it
+    /// (timer, volume, playback) are single commands whose detail lives in the
+    /// words: "turn it up", "next track", "cancel the timer". Handing them the
+    /// sentence is what lets one command cover all of a thing, instead of a
+    /// separate action kind per verb.
+    private func perform(_ macro: Macro, payload: String?, heard: String = "",
+                         forceNewTab: Bool = false,
+                         bringHere: Bool = false, quitTarget: Bool = false,
                          browserFresh: Browser.Fresh? = nil, id: Int = 0,
                          completion: @escaping (String?) -> Void) {
         switch macro.kind {
         case .app:
+            // "quit chrome" — the opposite of everything else here. Asked
+            // politely, so an app with unsaved work still gets to object.
+            if quitTarget {
+                quitApp(macro, completion: completion)
+                return
+            }
+
             // "bring over xcode": move its windows to this desktop *before*
             // activating, or activating would send us to the desktop it was on
             // and the move would be a visible yank back.
@@ -885,15 +1069,22 @@ final class ListenerEngine {
             if Prefs.speakReply { VoiceBox.shared.speak(line) }
             log("sleeping the Mac")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self] in
-                if !SystemPower.sleepNow() { self?.log("couldn't sleep the Mac") }
+                // Escape has to reach this. The line is spoken first and the
+                // Mac sleeps two and a half seconds later, and for those two
+                // and a half seconds "press Escape to stop everything in
+                // flight" was not true of the one action you would most want
+                // to take back. `cancel` bumps `runID`, so this lands stale.
+                guard let self, id == self.runID else { return }
+                if !SystemPower.sleepNow() { self.log("couldn't sleep the Mac") }
             }
             completion(nil)
 
-        case .weather:
-            Weather.shared.current { [weak self] result in
+        case .weather, .forecast:
+            let tomorrow = macro.kind == .forecast
+            Weather.shared.report(tomorrow: tomorrow) { [weak self] result in
                 switch result {
                 case .success(let summary):
-                    self?.log("weather: \(summary)")
+                    self?.log("\(tomorrow ? "forecast" : "weather"): \(summary)")
                     self?.ifCurrent(id) {
                         if Prefs.showHUD { HUDOverlay.shared.setHeadline(summary) }
                     }
@@ -909,6 +1100,209 @@ final class ListenerEngine {
                     completion(nil)
                 }
             }
+
+        case .search:
+            guard let query = payload, let url = WebSearch.url(for: query, engine: macro.target)
+            else {
+                log("nothing to search for")
+                ifCurrent(id) {
+                    if Prefs.showHUD { HUDOverlay.shared.setDetail("Nothing to search for") }
+                }
+                completion(nil)
+                return
+            }
+            // Same reasoning as a website: bring the browser here first, or
+            // focusing the new tab would drag us to the browser's desktop.
+            if bringHere, let chrome = Browser.chromeURL(),
+               let running = Spaces.runningApp(atPath: chrome.path),
+               Spaces.bring(pid: running.processIdentifier) {
+                log("brought the browser to this desktop")
+            }
+            // Never reuses a tab. A search is a new question, and landing on
+            // the answer to the last one looks exactly like nothing happening.
+            if Browser.open(url.absoluteString, chromeProfile: macro.chromeProfile) {
+                log("searching for \"\(query)\"")
+            } else {
+                log("couldn't open the search")
+                ifCurrent(id) {
+                    if Prefs.showHUD { HUDOverlay.shared.setDetail("Couldn't open the search") }
+                }
+            }
+            completion(nil)
+
+        case .reminders:
+            Agenda.reminders { [weak self] result in
+                self?.deliverSpokenResult(result, id: id, what: "reminders")
+            }
+
+        case .agenda:
+            // "what's my next meeting" wants the one; "what's on today" wants
+            // the lot. Both are the same command — the sentence says which.
+            let wantsNext = PhraseMatcher.containsTokenRun(
+                PhraseMatcher.normalize(heard), "next")
+            let read = wantsNext ? Agenda.next : Agenda.today
+            read { [weak self] result in
+                self?.deliverSpokenResult(result, id: id, what: "calendar")
+            }
+
+        case .timer:
+            runTimer(heard: heard, id: id)
+            completion(nil)
+
+        case .volume:
+            // A sentence naming no direction is asking where it is now —
+            // "volume" on its own is a question, not a silent no-op.
+            let change = SystemAudio.change(for: heard) ?? .report
+            guard let line = SystemAudio.apply(change) else {
+                log("this output has no volume control Jarvis can reach")
+                announce("I can't reach this output's volume, sir.", id: id)
+                completion(nil)
+                return
+            }
+            log("volume: \(line)")
+            announce(line, id: id)
+            completion(nil)
+
+        case .media:
+            guard MediaKeys.available else {
+                log("playback keys need Accessibility")
+                announce("I need Accessibility for that, sir.", id: id)
+                completion(nil)
+                return
+            }
+            let transport = MediaKeys.transport(for: heard) ?? .playPause
+            if MediaKeys.press(transport.key) {
+                log("playback: \(transport.label)")
+                ifCurrent(id) {
+                    if Prefs.showHUD { HUDOverlay.shared.setHeadline(transport.label) }
+                }
+                announce(transport.spoken, id: id)
+            } else {
+                log("couldn't send the playback key")
+                announce("That didn't get through, sir.", id: id)
+            }
+            completion(nil)
+
+        case .lock:
+            // Say it first, then lock — the same bargain sleep makes, for the
+            // same reason: nobody hears a line delivered to a locked screen.
+            let line = "Locking up, sir."
+            if Prefs.showHUD { HUDOverlay.shared.setDetail(line) }
+            if Prefs.speakReply { VoiceBox.shared.speak(line) }
+            log("locking the screen")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                // Cancellable for the same reason sleeping is.
+                guard let self, id == self.runID else { return }
+                if !ScreenLock.lock() { self.log("couldn't lock the screen") }
+            }
+            completion(nil)
+        }
+    }
+
+    /// A command that produced its own exact words.
+    ///
+    /// Deliberately not routed through the model. "Volume at forty percent" and
+    /// "three reminders" are facts, and a generated paraphrase of a fact is
+    /// slower, occasionally wrong, and no more charming for it. The flavour
+    /// stays where it belongs — on the commands whose result is an action
+    /// rather than an answer.
+    private func announce(_ line: String, id: Int, asAnswer: Bool = false) {
+        ifCurrent(id) {
+            if Prefs.showHUD {
+                // The strip first, then the voice: the strip is what the
+                // envelope attaches to, and it has to be up to catch it.
+                asAnswer ? HUDOverlay.shared.setAnswer(line) : HUDOverlay.shared.setDetail(line)
+            }
+            if Prefs.speakReply { VoiceBox.shared.speak(line) }
+        }
+    }
+
+    /// A list read out loud — reminders, the day's calendar.
+    private func deliverSpokenResult(_ result: Result<String, Error>, id: Int, what: String) {
+        switch result {
+        case .success(let summary):
+            log("\(what): \(summary)")
+            announce(summary, id: id, asAnswer: true)
+        case .failure(let error):
+            log("\(what) failed: \(error.localizedDescription)")
+            ifCurrent(id) {
+                if Prefs.showHUD {
+                    HUDOverlay.shared.setHeadline("Couldn't read your \(what)")
+                    HUDOverlay.shared.setDetail(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// Setting, cancelling or checking the one timer.
+    private func runTimer(heard: String, id: Int) {
+        switch Countdown.intent(in: heard) {
+        case .set(let seconds):
+            let replaced = Countdown.shared.start(seconds)
+            let length = Countdown.spoken(seconds)
+            log("timer set for \(length)")
+            ifCurrent(id) {
+                if Prefs.showHUD { HUDOverlay.shared.setHeadline("Timer · \(Countdown.clock(seconds))") }
+            }
+            announce(replaced ? "Restarted — \(length), sir." : "Timer set for \(length), sir.",
+                     id: id)
+
+        case .cancel:
+            let had = Countdown.shared.cancel()
+            log(had ? "timer cancelled" : "no timer to cancel")
+            announce(had ? "Timer cancelled, sir." : "There's no timer running, sir.", id: id)
+
+        case .report:
+            guard let running = Countdown.shared.running else {
+                announce("No timer running, sir.", id: id)
+                return
+            }
+            let left = Countdown.spoken(running.remaining)
+            ifCurrent(id) {
+                if Prefs.showHUD {
+                    HUDOverlay.shared.setHeadline("Timer · \(Countdown.clock(running.remaining))")
+                }
+            }
+            announce("\(left) left, sir.", id: id)
+
+        case .needsDuration:
+            // A bare "timer" while one is running is a request to see it, not
+            // a half-finished sentence — the pill comes back rather than a
+            // question you'd have to answer with another double clap.
+            if let running = Countdown.shared.running {
+                if Prefs.showHUD { TimerBar.shared.show(running) }
+                announce("\(Countdown.spoken(running.remaining)) left, sir.", id: id)
+            } else {
+                announce("How long for, sir?", id: id)
+            }
+        }
+    }
+
+    /// "quit chrome". Polite, and never itself.
+    private func quitApp(_ macro: Macro, completion: @escaping (String?) -> Void) {
+        guard let running = Spaces.runningApp(atPath: macro.target) else {
+            log("\(macro.name) isn't running")
+            if Prefs.showHUD { HUDOverlay.shared.setDetail("\(macro.name) isn't running") }
+            completion(nil)
+            return
+        }
+        // Jarvis quitting Jarvis leaves nothing listening to be asked to come
+        // back, which is a bad enough outcome to be worth one comparison.
+        guard running.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            log("declining to quit myself")
+            if Prefs.showHUD { HUDOverlay.shared.setDetail("I'd rather not, sir") }
+            completion(nil)
+            return
+        }
+        // `terminate`, never `forceTerminate`: this is ⌘Q, so an app with
+        // unsaved work still gets to put its own dialog up and win.
+        if running.terminate() {
+            log("asked \(macro.name) to quit")
+            completion(nil)
+        } else {
+            log("\(macro.name) refused to quit")
+            if Prefs.showHUD { HUDOverlay.shared.setDetail("\(macro.name) wouldn't quit") }
+            completion(nil)
         }
     }
 
@@ -969,12 +1363,18 @@ final class ListenerEngine {
         VoiceBox.shared.speak(line)
     }
 
-    /// Run one command directly — the "Try it now" button in the editor.
+    /// Run one command directly — the "Try it now" button in the editor, and
+    /// the scripting hook.
     func run(_ macro: Macro, payload: String? = nil) {
         runID += 1
         didFire = false
+        // For the kinds that read the sentence, the text *is* the instruction:
+        // "set a timer for five minutes" has to arrive as something said, not
+        // as a payload they never look at. Without this, running Timer from a
+        // script could only ever ask how long for.
+        let heard = macro.kind.readsSentence ? (payload ?? "") : ""
         execute(Resolution(macro: macro, confidence: 1, source: .macro, payload: payload),
-                heard: "")
+                heard: heard)
     }
 
     /// Answer a question directly, without waiting on the microphone.

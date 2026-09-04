@@ -13,6 +13,14 @@ swiftc -O $T -o "$OUT/dsp" \
 "$OUT/dsp"
 
 echo
+echo "===== phrase matching, exact and cut short ====="
+swiftc -O $T -o "$OUT/matcher" \
+    Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
+    Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
+    Tests/matcher/main.swift
+"$OUT/matcher"
+
+echo
 echo "===== command resolution ====="
 swiftc -O $T -o "$OUT/resolver" \
     Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
@@ -48,7 +56,8 @@ echo "===== questions ====="
 swiftc -O $T -o "$OUT/questions" \
     Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
     Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
-    Jarvis/Questions.swift Jarvis/Intelligence.swift Tests/questions/main.swift
+    Jarvis/Questions.swift Jarvis/Intelligence.swift Jarvis/Calc.swift \
+    Jarvis/SystemInfo.swift Jarvis/Agenda.swift Tests/questions/main.swift
 "$OUT/questions"
 
 echo
@@ -83,6 +92,14 @@ swiftc -O $T -o "$OUT/bring" \
 "$OUT/bring"
 
 echo
+echo "===== talking to Chrome ====="
+swiftc -O $T -o "$OUT/applescript" \
+    Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
+    Jarvis/AppLauncher.swift Jarvis/Browser.swift \
+    Tests/applescript/main.swift
+"$OUT/applescript"
+
+echo
 echo "===== a fresh tab ====="
 swiftc -O $T -o "$OUT/tabs" \
     Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
@@ -101,3 +118,22 @@ echo "===== keyboard trigger ====="
 swiftc -O $T -o "$OUT/trigger" \
     Jarvis/Prefs.swift Jarvis/ClapDetector.swift Tests/trigger/main.swift
 "$OUT/trigger"
+
+echo
+echo "===== the new commands ====="
+swiftc -O $T -o "$OUT/commands" \
+    Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Macro.swift \
+    Jarvis/Resolver.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
+    Tests/commands/main.swift
+"$OUT/commands"
+
+echo
+echo "===== exact answers ====="
+swiftc -O $T -o "$OUT/answers" \
+    Jarvis/PhraseMatcher.swift Jarvis/Calc.swift Jarvis/Countdown.swift \
+    Jarvis/SystemAudio.swift Jarvis/MediaKeys.swift Jarvis/Spaces.swift \
+    Jarvis/WebSearch.swift Jarvis/SystemInfo.swift Jarvis/Agenda.swift \
+    Jarvis/Questions.swift Jarvis/Resolver.swift Jarvis/Macro.swift \
+    Jarvis/AppIndex.swift Jarvis/AppLauncher.swift Jarvis/Browser.swift \
+    Jarvis/HUDStyle.swift Tests/answers/main.swift
+"$OUT/answers"

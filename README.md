@@ -1,6 +1,6 @@
 # Jarvis
 
-A menu-bar app that listens for **two claps**, then does what you tell it. Opens apps, opens websites, reports the weather — and answers in JARVIS's voice using Apple's on-device model.
+A menu-bar app that listens for **two claps**, then does what you tell it. Opens apps and websites, searches the web, sets timers, works the volume and the music, reads back your day, reports the weather — and answers in JARVIS's voice using Apple's on-device model.
 
 The mic is only transcribed for a few seconds after a clap. Nothing is listened to the rest of the time.
 
@@ -12,7 +12,7 @@ cd ~/Desktop/jarvis && ./install.sh
 
 Or open `Jarvis.xcodeproj` and hit Run. No Dock icon — look for the clap icon in the menu bar.
 
-macOS will ask for **Microphone** and **Speech Recognition** up front, then **Location** (weather), **Reminders**, and **Automation → Chrome** (reusing an open tab) the first time each is needed. Requires macOS 26 for Apple Intelligence.
+macOS will ask for **Microphone** and **Speech Recognition** up front, then **Location** (weather), **Reminders**, **Calendar** (reading your day back), and **Automation → Chrome** (reusing an open tab) the first time each is needed. **Accessibility** is optional and covers two things: the desktop-switching gestures and the playback keys. Requires macOS 26 for Apple Intelligence.
 
 ## Using it
 
@@ -37,6 +37,14 @@ clap clap  "what's it like outside"    -> weather on screen
 clap clap  "open a new tab"            -> a fresh tab in the front window
 clap clap  "open new tab on personal"  -> a fresh Chrome window, Connor profile
 clap clap  "remind me september 3rd at 10am to brush my teeth"
+clap clap  "quit chrome"               -> asks Chrome to quit
+clap clap  "set a timer for ten minutes"
+clap clap  "turn it up"                -> volume up a notch
+clap clap  "next track"                -> skips whatever is playing
+clap clap  "search for how to poach an egg"
+clap clap  "what's on my calendar"     -> read out loud
+clap clap  "what's fifteen percent of two hundred and forty"
+clap clap  "lock the screen"
 ```
 
 ### Chrome profiles
@@ -76,13 +84,17 @@ Matching is by host, plus path prefix when the command's URL has one. Turn it of
 
 **Reuse only applies to commands with no fixed profile.** Chrome doesn't tell scripts which profile a window belongs to — `given name` is empty, `mode` is just normal/incognito, and the title says nothing — so a matching tab can't be attributed to an account. Rather than risk opening your school site in your personal window, a command pinned to a profile always opens there. If you'd rather have reuse on a particular site, set its Profile to "Default browser".
 
-Only your **four most recently used Chrome windows** are searched. Chrome answers scripting requests slowly once a lot of windows are open — asking about every tab in a twelve-window browser took over three seconds and timed out, while the front four answer in about half a second.
+Only your **six most recently used Chrome windows** are searched. Chrome answers scripting requests slowly once a lot of windows are open — asking about every tab in a twelve-window browser took over three seconds and timed out, while the front few answer in about half a second.
+
+Everything Jarvis asks Chrome goes through AppleScript — which tabs are open, focus this one, make a new window — and **compiling an AppleScript costs 26 ms**, measured. Each request used to be built as a fresh source string with the window id or URL pasted into it, so a single "open gmail" spent 52 ms compiling before it had said a word to Chrome. They are now handlers of one document, compiled once, with the varying parts passed as arguments; a warm call costs 0.1 ms. That is also the safer arrangement, because an argument is *data*: a URL containing a quote or a backslash can no longer break the script or change what it says, and there is no hand-rolled escaping left to get wrong.
 
 Under the hood this launches `open -n -a "Google Chrome" --args --profile-directory=<dir> <url>`. The `-n` matters: launch arguments only reach a *new* Chrome instance, which then routes the request into the right profile. Without it, a running Chrome just gets activated and the profile flag is silently dropped.
 
 A leading "jarvis" or "hey jarvis" is optional and always stripped.
 
 **Press Escape any time after clapping** to kill the HUD and stop everything in flight — the listener, the model, the voice.
+
+**Or just clap again.** A double clap during a command interrupts it and starts a new phrase, whatever was happening — a model still thinking, a reply still being spoken, a camera still watching. It used to be ignored: arming insisted on being idle, and every command parks the app in "on it" for over three seconds afterwards, so for those three seconds Jarvis was deaf to the one gesture that wakes it. Which is exactly when you are most likely to clap again, having got the wrong thing.
 
 Every app on your Mac already works without setup: 100 were indexed here — including `~/Downloads` — so "open audacity" or "fire up xcode" just work. Macros are for renaming things — teaching it that *"the craft"* means Minecraft.
 
@@ -121,7 +133,7 @@ The two halves take turns, and the rule is the same in both directions — **who
 |---|---|---|
 | You say a command | resolves and runs it | **off**, immediately |
 | You say nothing | gives up after ~6 s | keeps watching for ~8 s |
-| You say something it can't place | gives up | keeps watching — this is what gestures are for |
+| You say something it can't place | hands it to the model after ~1 s | keeps watching — this is what gestures are for, and a hand still wins while the model thinks |
 | You gesture | **stops listening**, mid-phrase if need be | runs it, stays open ~2.5 s for another |
 | Escape | cancels | cancels |
 
@@ -174,13 +186,32 @@ The menu shows what is missing, and **Hand gestures after a double clap** turns 
 
 - **Name** — what the HUD says. "Minecraft" becomes "Opening Minecraft".
 - **Says** — comma-separated phrases. Either a bare target (`the craft`) that pairs with any verb, or a whole catchphrase (`wake up daddy's home`) you say on its own.
-- **Action** — open an app, open a website, or report the weather.
-- **Profile** — for websites, which Chrome profile to open in. Reads your real profiles out of Chrome, so it lists them by the names you gave them.
-- **Target** — an app (there's a **Choose…** picker) or a URL.
+- **Action** — thirteen of them: open an app, open a website, search the web, report the weather, report tomorrow's forecast, add a reminder, read out your reminders, read out your calendar, set a timer, change the volume, play/pause or skip, lock the screen, put the Mac to sleep.
+- **Profile** — for websites and searches, which Chrome profile to open in. Reads your real profiles out of Chrome, so it lists them by the names you gave them.
+- **Target** — an app (there's a **Choose…** picker), a URL, a search engine, or a Reminders list. The actions that need nothing hide the box entirely.
 
-The **Says** and **Target** boxes wrap and scroll, so long phrase lists and long URLs stay fully readable.
+The **Says** and **Target** boxes wrap and scroll, so long phrase lists and long URLs stay fully readable. The guidance under the form changes with the action, because a phrase means something different for a reminder than for an app.
 
 **Try it now** runs the command immediately so you can check it before relying on it.
+
+Phrases behave one of three ways, depending on the action:
+
+| | How the phrase is matched | Actions |
+|---|---|---|
+| **Loose** | anywhere in the sentence, fuzzily | apps, websites, weather, forecast, reminders, calendar |
+| **A prefix** | at the front, and what follows is the content | add a reminder, search the web |
+| **Near-exact** | the whole sentence, give or take a typo | lock, sleep |
+
+Timers, volume and playback are matched loosely and then **read the whole
+sentence**: "cancel the timer", "turn it up" and "next track" are one command
+each with the detail buried in the words, so the action is handed what you
+actually said and works it out. That is what keeps them one command apiece
+instead of an action per verb.
+
+New built-in commands reach an existing installation too. Your saved commands
+are never re-seeded, so anything added in a later version is offered once,
+skipped if you already have one by that name, and never brought back if you
+delete it.
 
 ## Putting the Mac to sleep
 
@@ -222,13 +253,180 @@ Unlike every other command, a dictated one doesn't fire the instant it parses �
 
 Add your own trigger phrases, or point it at a specific list, under **Commands…**.
 
+## Timers
+
+```
+"set a timer for ten minutes"       "timer for thirty seconds"
+"set a timer for half an hour"      "timer for an hour and a half"
+"set a timer for two and a half hours"
+"how long is left"                  "cancel the timer"
+```
+
+A pill appears in the corner of the screen with the time left and a ring that
+unwinds. It stays there while you work, turns amber for the last ten seconds,
+and flashes when the time is up.
+
+**One timer at a time**, deliberately. Several named timers would need a way to
+say which one you meant, a way to show them all, and a way to cancel the right
+one — three new things to get wrong for a feature whose whole appeal is that you
+say six words and forget about it. Starting a second replaces the first and
+Jarvis says so, which is the honest version of a limit rather than a silent one.
+The menu shows a running timer and can cancel it without your saying anything.
+
+Nothing polls. The deadline is one timer scheduled once; the ring is a single
+Core Animation stroke handed to the GPU at the start and never touched again,
+and the only thing on a clock is the digits, which change once a second. A
+twenty-minute timer costs twelve hundred label updates and no per-frame work.
+
+Two parsing details worth knowing, because both were wrong first time:
+**"half an hour" is thirty minutes** — reading the article as the number one made
+it sixty — and **"two and a half hours" adds** rather than replaces, or the half
+would eat the two and run for thirty minutes. An amount with no unit after it is
+refused rather than guessed at: "timer for five" could mean seconds or minutes,
+and picking one silently is how a five-second timer runs for five.
+
+## Volume and playback
+
+```
+"turn it up"        "louder"      "volume down"     "quieter"
+"mute"              "unmute"      "be quiet"        "max volume"
+"set the volume to forty"         "volume sixty percent"
+"how loud is it"
+```
+
+```
+"pause"      "resume"      "next track"      "previous track"      "skip"
+```
+
+Volume goes through **CoreAudio directly** — in process, no permission, a read
+costs a few microseconds. Not AppleScript's `set volume`, which would mean
+compiling and running a script for a number and would go through Apple Events,
+the one thing here that needs a permission prompt. An output with no volume
+control Jarvis can reach — HDMI and a good many USB interfaces hand volume to
+the hardware — says so out loud instead of pretending.
+
+Playback sends the **media key**, the same one on the top row of the keyboard,
+so it reaches whatever macOS considers to be playing: Music, Spotify, a video in
+a tab, a podcast. One command covers all of them with no per-app Automation
+prompt and no list to maintain. The cost is that synthesising any key needs
+**Accessibility**, exactly as the desktop-switching gestures do; without it the
+command says what is missing rather than silently doing nothing.
+
+There is no bare "play", and that is deliberate: **"play" is already a verb
+meaning open**, so "play minecraft" has to keep opening Minecraft. It costs
+nothing, because the key macOS sends is a *toggle* — "pause" starts a paused
+track as readily as it stops a playing one.
+
+Both read the whole sentence rather than a captured tail, so one command covers
+all of a thing instead of an action per verb. Matching is on **whole words, not
+substrings**: "up" lives inside "upload" and "play" inside "display", and a
+command that pauses your music because you said "display" is worse than one that
+misses.
+
+## Searching the web
+
+```
+"search for how to poach an egg"     "look up the offside rule"
+"google for swift concurrency"       "search the web for tide times"
+```
+
+The phrase is a prefix and everything after it is the query. It opens in a new
+tab every time — a search is a new question, and landing on the answer to the
+last one looks exactly like nothing happening — and honours a Chrome profile the
+same way a website command does.
+
+**Engine** in the editor is the search URL the words are added to. Leave it empty
+for Google, or paste another site's search URL and the same machinery points at
+YouTube or Amazon with no code here knowing about either. Put `%s` in the URL if
+the words don't belong on the end.
+
+Queries are escaped as a *query component*, which is stricter than it sounds:
+`&`, `=`, `+` and `#` are all legal in a URL and all change what the search engine
+receives, so each is escaped rather than passed through. "c# vs f#" searches for
+what you said instead of for "c".
+
+**There is deliberately no bare "google" trigger.** It would capture "google
+chrome" as a search for "chrome", and opening the browser is what that sentence
+has always meant.
+
+## Quitting an app
+
+```
+"quit chrome"      "close chrome"      "quit out of xcode"      "kill spotify"
+```
+
+The mirror of opening one, and it uses the same matching, so it reaches any
+installed app rather than only the commands you have written.
+
+`terminate` is what ⌘Q sends, so an app with unsaved work still gets to put its
+own dialog up and win — this asks an app to stop, it does not kill it. Jarvis
+declines to quit itself, on the grounds that nothing would then be listening to
+be asked to bring it back.
+
+Deliberately no "shut down" or "power off" in the verb list: those belong to the
+sentence about the *Mac*, and the one thing worse than a command that doesn't
+work is one that works on the wrong noun.
+
+## Locking the screen
+
+```
+"lock the screen"     "lock it up"     "lock my mac"     "lock screen"
+```
+
+The same three guards sleeping has, for the same reasons: **near-exact
+matching**, so "what's the lock screen shortcut" and "remind me to lock the door"
+leave the screen alone; **a verb in front means you meant something else**, so
+"open lock" asks to open an app called Lock; and **the model can't reach it**, so
+a misheard question can never lock you out.
+
+It calls the same thing the Apple menu's Lock Screen item does, resolved at run
+time so a future macOS that stops publishing it fails honestly rather than
+crashing. Not `pmset displaysleepnow`, which only locks if your password setting
+says "immediately" and otherwise looks like the command silently failing.
+
+Like sleeping, it says the line first and locks a moment later — and **Escape
+still stops it**, which is now true of sleeping too.
+
+## Reading back your day
+
+```
+"what are my reminders"      "what's on my list"      "what do i have to do"
+"what's on my calendar"      "my schedule"            "what's my next meeting"
+"am i free"
+```
+
+Reminders due today or overdue, and today's remaining calendar events, read out
+loud and shown in the strip at the bottom of the screen.
+
+**Read-only, and there is no other kind.** No command in Jarvis can delete a
+reminder or move a meeting. Voice recognition is good, not perfect, and the cost
+of a misheard "delete" is not symmetrical with the cost of a misheard "read".
+
+Undated reminders are included, which took a second attempt: asking EventKit for
+reminders "due before tonight" excludes the ones with no due date at all, and a
+list you never dated is still a list of things to do. The range is applied
+afterwards instead, where undated can mean "always relevant".
+
+Held to **three items and then a count** — "five reminders, sir: buy milk, call
+mum and book the car, and two more". This is spoken aloud, and a fourteen-item
+list read out is not information; by item five you have stopped listening. The
+count comes first so the number is the thing you hear even if you tune out the
+rest.
+
+Reminders reuse the access the reminder command already asked for. The calendar
+is a separate grant, asked for the first time you ask about it, and the menu says
+so if you decline.
+
+
 ## Voice
 
 **Jarvis speaks with the best voice installed, and picks it automatically** — ranked by quality first, then a British accent, then male, with Apple's novelty voices ("Bubbles", "Bad News") pushed to the bottom.
 
 ### Make it sound good
 
-The **Voice** menu lists every voice installed, grouped by quality with a count: Premium, Enhanced, English (compact), Other languages. It re-reads the list each time you open the menu, so a voice you just downloaded shows up without relaunching.
+The **Voice** menu lists every voice installed, grouped by quality with a count: Premium, Enhanced, English (compact), Other languages. A voice you just downloaded shows up without relaunching.
+
+Reading that list out of the system costs **119 ms** with the usual 180 voices installed — measured, and not a warm-up cost that goes away. It used to be paid on the main thread before *every spoken line*, on every menu open, and once during launch, which was most of the gap between a reply being written and it being heard. It is now read once and kept: macOS announces when the set of voices changes, and opening the menu also re-checks in the background, so a new download appears either way.
 
 Apple's **Enhanced** and **Premium** voices are a free download, run entirely on-device, and sound dramatically better than the compact ones shipped by default.
 
@@ -264,11 +462,59 @@ clap clap  "tell me a joke"
 
 Recognised by opener — *what, when, where, why, who, how, which, is, are, was, do, can, could, should, would, if, tell me, explain*. Turn it off with **Answer questions**.
 
-**Commands always win.** The command resolver runs first, so "what's the weather" still hits your instant Weather command and never reaches the model. Only what the resolver can't place is treated as a question. Checking costs **3.4 µs** against the **702 µs** it takes to resolve a command — 0.5%, and only on the path where nothing matched. Opening an app is exactly as fast as before.
+**Commands always win.** The command resolver runs first, so "what's the weather" still hits your instant Weather command and never reaches the model. Only what the resolver can't place is treated as a question. Checking costs **2.5 µs** against the **150–700 µs** it takes to resolve a command — well under a percent, and only on the path where nothing matched. Opening an app is exactly as fast as before.
 
 Answers take roughly 0.6–2 seconds and are held to two sentences, because you're listening to them rather than reading them. Stage directions, markdown and rambling get stripped before they're spoken.
 
 **The clock is answered from the clock.** "What time is it" and "what day is it" are answered from the system clock instead of the model — asked cold, it confidently invented "2:13 p.m." at half past nine at night. Every other question gets the real date and time handed to it as context.
+
+### Anything with an exact answer gets one
+
+The clock was the first of these, and the principle generalises: a language
+model is confidently, fluently wrong at precisely the questions the Mac can
+answer itself, and a wrong number is one you act on. So these never reach it.
+
+```
+"what's twelve times eight"            "what's fifteen percent of 240"
+"what's twenty percent off fifty"      "what's 2 to the power of 10"
+"how many kilometres in five miles"    "convert 20 celsius to fahrenheit"
+"how many ounces in a pound"           "how many minutes in an hour"
+"how much battery do i have"           "what's my uptime"
+"what's my ip address"                 "how much space is left"
+"what time is it in tokyo"             "what time is it in new york"
+"flip a coin"                          "roll a die"      "roll a d20"
+"pick a number between 1 and 10"       "what can you do"
+```
+
+The **sums are parsed, not evaluated by a library**. `NSExpression` would be four
+lines, but it raises an Objective-C exception on malformed input — which Swift
+cannot catch, so "what's five plus" would take the whole app down. A hand-written
+recursive-descent parser returns nothing instead, and nothing simply falls
+through to the model like any other sentence it couldn't place.
+
+Two things it gets right that are easy to get wrong. **A decimal point survives**:
+the normalizer the rest of the app uses keeps letters and digits and turns
+everything else into a space, so "3.5 plus 1.25" arrives as "3 5 plus 1 25" and
+comes to a hundred and sixty. Sums get their own tidying that leaves `.`, `%` and
+brackets alone. And **spaces are kept rather than stripped**, so "12 8 plus 3"
+fails to parse instead of quietly answering 131 — the parser steps over
+whitespace between tokens but refuses to read a number across it.
+
+**Random is random.** A model asked to flip a coin has favourites; asked for a
+number between one and ten it will give you seven twice running. The test flips
+two hundred coins and rolls two hundred dice and insists on seeing every face.
+
+**Free disk space is the one slow answer**, and it gets its own path. The figure
+Finder shows — the one worth saying, because it counts space macOS would reclaim
+on demand — costs **ten milliseconds** to read, measured. That is a dropped frame
+or two of the HUD's animation, so it runs on a background queue and the answer
+arrives when it arrives. Everything else here is microseconds and runs inline.
+
+World clocks need no table to maintain: macOS ships four hundred-odd zone
+identifiers shaped `Region/City`, so the city is the last path component with its
+underscores turned back into spaces, and New York and Los Angeles fall out for
+free. Reading and folding that list costs a few milliseconds, so it is warmed in
+the background on the double clap — the same bargain the voice catalogue makes.
 
 ## How it decides what you meant
 
@@ -276,15 +522,37 @@ Three tiers, ordered so the thing that matters — opening your app — never wa
 
 | Tier | What | Measured cost | Blocks your app? |
 |---|---|---|---|
-| 1 | String matching against your commands + installed apps | ~0 ms | **yes, and it's the only one that does** |
+| 1 | String matching against your commands + installed apps | 0.15–0.7 ms | **yes, and it's the only one that does** |
 | 2 | Apple Intelligence names a target, tier 1 validates it | ~350–580 ms warm | only when tier 1 found nothing |
 | 3 | Apple Intelligence writes the spoken reply | ~500–800 ms | **never** — runs after the app already opened |
 
 **Tier 1** handles everything normal. It strips "jarvis", strips the verb, and fuzzy-matches what's left against your phrases and then every installed app.
 
-It waits about **0.6 seconds** after you stop talking before acting (about a second for dictated commands like reminders). That pause isn't laziness: speech arrives a word at a time, and "open chrome" is a complete command right up until it becomes "open chrome on work". Acting on the first thing that parses meant trailing qualifiers were never heard.
+It waits about **0.6 seconds** after you stop talking before acting (about a second for dictated commands like reminders, and the same for anything it can't place). That pause isn't laziness: speech arrives a word at a time, and "open chrome" is a complete command right up until it becomes "open chrome on work". Acting on the first thing that parses meant trailing qualifiers were never heard.
 
-**Tier 2** only runs when tier 1 comes back empty, so it costs nothing in the common case. It catches loose phrasing — *"I could go for some blocky building"* → Minecraft, *"check my inbox"* → Gmail. The model is prewarmed on the double clap, so it's hot by the time it's needed (cold, it costs 4+ seconds).
+This runs on the main thread, once per partial transcript, which for a spoken sentence is a few dozen times — so what it costs is worth knowing. Three things get it there.
+
+The transcript is split into words and characters **once** rather than for every phrase of every command and then every app — a hundred and forty times over — and a window of it is a slice rather than a freshly built array. The edit distance is told what score it would have to beat, so it fills in only the diagonal band that could still land inside it and abandons a row whose cheapest cell has already overshot: two strings with nothing in common cost a row or two instead of the whole matrix.
+
+And **the phrases are now prepared too**. That first optimisation fixed one side of the comparison and left the other alone: every phrase was still being turned into an array of characters *and* an array of arrays of characters on each partial transcript. With a hundred-odd phrases that came to **100 µs a call**, more than half the cost of resolving anything, all of it re-deriving something that only changes when you edit your commands. The listener now keeps a prepared catalogue and rebuilds it when they change.
+
+That last one is what paid for this release. Doubling the number of built-in commands would otherwise have tripled tier 1; instead every phrase got faster than it was before:
+
+| Spoken | Before (7 commands, 43 phrases) | Now (15 commands, 113 phrases) |
+|---|---|---|
+| "open chrome" | 184 µs | **108 µs** |
+| "jarvis open chrome on work" | 270 µs | **153 µs** |
+| "bring over xcode" | 571 µs | **213 µs** |
+| "what is the capital of france" | 751 µs | **653 µs** |
+| a rambling sentence matching nothing | 1614 µs | **1394 µs** |
+
+None of it changes an answer, and that isn't taken on trust — `Tests/matcher` checks the cut-short distance against a plain full-matrix implementation, checks across thousands of generated phrases that every score at or above the bar comes back exactly as it would have, including scores landing precisely *on* it (which is where binary floating point would otherwise lose one), and checks that the prepared catalogue and the unprepared path resolve every phrase identically.
+
+**Tier 2** only runs when tier 1 comes back empty, so it costs nothing in the common case. It catches loose phrasing — *"I could go for some blocky building"* → Minecraft, *"check my inbox"* → Gmail.
+
+It starts **a second after you stop talking**, not when the listening window runs out. That used to be the same thing: nothing scheduled the handover, so a phrase tier 1 couldn't place sat in silence for the full six seconds and only *then* began to think. Every tier-2 command was six seconds slower than it needed to be, which is most of what made loose phrasing feel like it didn't work.
+
+A whole session is prewarmed on the double clap, so the model is hot by the time it's needed (cold, it costs 4+ seconds). All three jobs are — interpreting, replying and answering each have their own standing instructions, and *creating* the session is what makes the model read them. Sessions used to be built at the moment they were needed, so every call paid for that inline and the prewarmed one held nothing but the model in memory. Each is used once and replaced with a fresh warm one in the background, so no request ever sees another's transcript.
 
 Crucially, the model doesn't pick the action itself — it just **names** what you seem to want, and that name goes back through tier 1's matcher. So it can reach any installed app, not only the commands you've written, and it can't fire something unrelated to the name it gave: if the name matches nothing, nothing happens.
 
@@ -294,11 +562,50 @@ Switch tiers 2 and 3 off entirely with **Use Apple Intelligence**. Everything st
 
 ## The HUD
 
+The microphone opens **before** the reticle is built. Nothing is buffered from before the clap — that is the promise the whole feature rests on — so a word said in the gap between clapping and the recogniser opening is simply gone, and building a full-screen window and its layer tree first put exactly that gap there. People do not wait politely for a HUD before speaking. The reticle costs a couple of milliseconds either way.
+
 Clapping brings up a full-screen reticle on every display with a countdown ring for your speaking window. When a command resolves, it snaps to gold with a flash and a particle burst.
 
 The headline is **what it's doing** — "OPENING CLAUDE", "CHECKING THE WEATHER" — never the raw transcript. Weather replaces the headline with the conditions when they land. The JARVIS line appears underneath as it's spoken.
 
 The overlay is click-through and never takes focus. **Preview the HUD** shows the whole sequence without clapping.
+
+### The reticle breathes with your voice
+
+The dot at the centre swells as you speak. It is the one honest signal the HUD
+can give that it is *hearing* you without showing what it thinks you said —
+which stays the rule. A reticle that sat perfectly still for six seconds gave
+you no way at all to tell "listening" from "not working".
+
+The level is curved rather than linear, for the reason the answer strip's
+waveform is: speech is mostly quiet with brief loud peaks, and drawn straight it
+sits flat on the floor and twitches only on plosives. Fast attack, slow release,
+so it tracks the voice instead of strobing between frames.
+
+It costs two layer writes at the twenty-four frames a second the clap detector
+already reports, and **only while a phrase is being spoken** — the engine asks
+for levels when it arms and stops when it stops, so the idle cost is exactly
+zero. That mattered enough to derive the flag from the state machine in one
+place rather than set it by hand in each of the eight paths that end a phrase.
+
+### The corner readouts say something true
+
+Three of the four used to be decoration — a hard-coded "AUD 48.0 kHz" on a Mac
+running at 44.1, and a "SYS 100%" that meant nothing at all. They are now the
+real input sample rate, the real battery, the real time, and whether there is a
+network. A panel that tells you the truth is worth more than one that looks like
+it might. "MK VII" stays exactly as it was; it was never claiming to be a
+measurement.
+
+They are read once per HUD rather than once per display, so a Mac with three
+monitors asks about its battery once.
+
+### A timer keeps its own corner
+
+A running timer gets a pill in the top right with the time left and a ring that
+unwinds — see [Timers](#timers). It sits above the reticle so a timer stays
+visible while you give another command, and the two never overlap: the reticle is
+centred and the pill is in the corner.
 
 ## Clap detection
 
@@ -322,9 +629,41 @@ notifyutil -p com.connorchristopherson.Jarvis.commands  # open the editor
 notifyutil -p com.connorchristopherson.Jarvis.previewHUD
 ```
 
+Two more take arguments, so they need a distributed notification rather than
+`notifyutil` — `…Jarvis.run` with `{"command": "Timer", "text": "5 minutes"}` and
+`…Jarvis.ask` with `{"text": "how much battery do i have"}`. For the commands
+that read the whole sentence, the text is the instruction: `run` with
+`{"command": "Volume", "text": "set the volume to thirty"}` does what saying it
+would.
+
 ## Weather
 
 Open-Meteo — no account, no API key. Location comes from Location Services, or set fixed coordinates under **Weather ▸** to skip location access entirely. Fahrenheit or Celsius in the same menu.
+
+"What's it like outside" gives current conditions, with **feels-like only when it
+disagrees** by three degrees or more — printing "feels like 71" next to "71°F" on
+an ordinary day is noise. Say **tomorrow** and you get the forecast instead:
+tomorrow's low and high, the conditions, and the chance of rain when it is worth
+mentioning.
+
+```
+"what's it like outside"     -> 64°F · Partly cloudy
+"how's tomorrow looking"     -> Tomorrow: 58–71°F · Rain showers · 70% chance
+"will it rain tomorrow"      "tomorrow's forecast"      "what about tomorrow"
+```
+
+Every forecast phrase says "tomorrow", deliberately. The weather command already
+answers to "forecast", and two commands a hair apart in the matcher decide by
+array order rather than by what you meant — so the forecast only answers to
+sentences the other one cannot match at all.
+
+The answer is **kept for three minutes**, with **a slot for each question**.
+Conditions don't change minute to minute, and asking twice in a row used to mean
+a location fix and a network round trip both times — seconds of "Checking the
+weather" for a number already known. A single slot would have meant today and
+tomorrow evicting each other every time, so anyone who asked both got no caching
+at all. Switching between Fahrenheit and Celsius asks again rather than
+converting nothing.
 
 ## Tuning
 
@@ -354,9 +693,33 @@ Gestures too twitchy, or not twitchy enough, live in `GestureConfig` in [Gesture
 
 Offline, no mic or network: clap detection against synthetic audio (real claps, distant claps, sustained noise, speech-like bursts, music with rests, silence), phrase matching, command resolution — every verb, macros, installed-app fallback, a set of conversational phrases that must *not* fire, and a regression case pinning "the craft" to the right launcher — plus Chrome profile discovery and the check that commands saved before profiles existed still load.
 
+The phrase matcher is held to its old answers. It now stops measuring as soon as it can tell a phrase is below what the caller would accept, and its edit distance fills in only the band that could still land inside the limit — both are supposed to be invisible, so the test checks the cut-short distance against a plain full-matrix implementation over eight thousand pairs, and checks across eighteen thousand generated comparisons that every score at or above the bar is exactly the score the exhaustive version would have given. Scores landing precisely *on* the threshold are built deliberately and checked separately, because that is the case binary floating point loses. It prints what resolving actually costs, and fails if the slowest phrase drifts past 3 ms.
+
+The Chrome scripts are compiled and their handlers called without Chrome being involved: every handler the Swift side asks for exists under that exact name and with that arity, and arguments carrying quotes, backslashes, tabs, newlines and an AppleScript injection attempt all arrive verbatim.
+
 The keyboard trigger's shortcut table is checked for duplicates, bare keys with no modifier, and a clean round trip through the preference.
 
 The gesture recogniser runs offline against a synthetic stream of hand positions — every gesture, everything that must *not* fire, dropped frames, hands flung off the edge of the picture, a change in hand count mid-gesture, and the diagnosis it prints when nothing lands.
+
+The newer commands get two suites of their own. **`Tests/commands`** is mostly a
+regression net: every phrase added is a fresh chance to shadow one that was
+already there, so it pins "google chrome" to the browser rather than a web
+search, "play minecraft" to Minecraft rather than the play/pause key, "remind me
+to look up the recipe" to a reminder rather than a search, and a bare "forecast"
+to current conditions. It checks locking has every guard sleeping has, that
+quitting is a verb rather than a command, and — against real persistence, in the
+test binary's own preferences domain — that an installation predating these
+commands is offered them exactly once, that one you deleted is not resurrected,
+that a command you wrote yourself is never shadowed by a built-in of the same
+name, and that a single unreadable command no longer takes the whole list with
+it.
+
+**`Tests/answers`** covers everything the Mac works out for itself: sums,
+percentages, unit conversions, timer durations, volume and transport words, and
+the search URL's escaping. Several of its cases are bugs that were caught here
+first — "3.5 plus 1.25" coming to a hundred and sixty, "12 8 plus 3" quietly
+answering 131, "half an hour" running for an hour, "two and a half hours" running
+for thirty minutes.
 
 Gestures are covered the same way: the recogniser takes timestamped hand positions rather than reading a clock, so a synthetic stream can assert on the awkward cases directly — a hand entering frame, a hand put back down, a slow drift across the desk, one hand sweeping past a resting one, a dropped frame mid-swipe.
 
