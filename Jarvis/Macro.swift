@@ -151,7 +151,13 @@ struct Macro: Codable, Equatable, Identifiable {
 
     var subtitle: String {
         switch kind {
-        case .app:     return (target as NSString).lastPathComponent
+        case .app:
+            let base = (target as NSString).lastPathComponent
+            // Worth saying out loud, because this one command does two things
+            // depending on what's running and there is nowhere else to find
+            // that out.
+            guard Minecraft.isLauncher(path: target) else { return base }
+            return "\(base) · or the game, once it's up"
         case .url, .search:
             let base = kind == .search && target.isEmpty ? "Google" : target
             guard let profile = Browser.profileName(for: chromeProfile) else { return base }
@@ -194,9 +200,10 @@ extension Macro {
             phrases: ["the weather", "weather", "whats it like outside",
                       "hows it looking outside", "forecast"],
             kind: .weather, target: ""))
-        // Whichever launcher is actually installed.
-        let launchers = ["Prism Launcher", "MultiMC", "ATLauncher", "Minecraft"]
-        if let launcher = launchers.lazy
+        // Whichever launcher is actually installed. The list lives with the
+        // routing that reads it, in Minecraft.swift, because seeding the
+        // command and deciding a command *is* this one have to agree.
+        if let launcher = Minecraft.launcherNames.lazy
             .compactMap({ name in AppIndex.shared.entries.first { $0.name == name } })
             .first {
             macros.append(Macro(

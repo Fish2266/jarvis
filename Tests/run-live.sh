@@ -8,7 +8,7 @@ T="-target arm64-apple-macos26.0"
 
 echo "===== Apple Intelligence ====="
 swiftc -O $T -parse-as-library -o "$OUT/intel" \
-    Jarvis/Intelligence.swift Jarvis/Macro.swift Jarvis/AppLauncher.swift \
+    Jarvis/Intelligence.swift Jarvis/Macro.swift Jarvis/Minecraft.swift Jarvis/AppLauncher.swift \
     Jarvis/PhraseMatcher.swift Jarvis/AppIndex.swift Jarvis/Resolver.swift \
     Jarvis/Browser.swift Tests/live/intelligence_tests.swift
 "$OUT/intel"

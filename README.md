@@ -28,7 +28,7 @@ A second family of verbs goes the other way. **open** takes *you* to the app, sw
 clap clap  "open xcode"                -> switches to Xcode's desktop
 clap clap  "bring over xcode"          -> Xcode's windows come to this desktop
 clap clap  "bring xcode over here"     -> the same, said the long way
-clap clap  "start up the craft"        -> Prism Launcher
+clap clap  "start up the craft"        -> Prism Launcher, or the game if it's running
 clap clap  "open chrome"               -> Google Chrome
 clap clap  "jarvis, open my email"     -> Gmail, in the Work profile
 clap clap  "open youtube"              -> YouTube, in the Connor profile
@@ -100,6 +100,14 @@ A leading "jarvis" or "hey jarvis" is optional and always stripped.
 **Or just clap again.** A double clap during a command interrupts it and starts a new phrase, whatever was happening — a model still thinking, a reply still being spoken, a camera still watching. It used to be ignored: arming insisted on being idle, and every command parks the app in "on it" for over three seconds afterwards, so for those three seconds Jarvis was deaf to the one gesture that wakes it. Which is exactly when you are most likely to clap again, having got the wrong thing.
 
 Every app on your Mac already works without setup: 100 were indexed here — including `~/Downloads` — so "open audacity" or "fire up xcode" just work. Macros are for renaming things — teaching it that *"the craft"* means Minecraft.
+
+### Minecraft
+
+"open minecraft" means two different things and always has. Before you're in a world it means the launcher — Prism here, and MultiMC, ATLauncher or Mojang's own if that's what's installed — because that is where the instance gets picked. Once the game is up it means the game: dropping the launcher window in front of the world you're standing in is the one thing it can't have meant. So the command checks, and goes wherever you actually meant.
+
+"bring over minecraft" and "quit minecraft" follow it. Saying the launcher's name doesn't — "open prism" is a request for Prism even mid-game, which is when you'd be asking.
+
+Nothing here knows a version number. Every launcher starts the game as a bare `java` process with no bundle identifier and no name but "java", so it can't be found by path or id the way every other app is; it is found by its command line, which names the client jar whatever the version, loader or launcher. 26.2 and 1.8.9 look identical to it.
 
 ## Triggering it
 
@@ -903,6 +911,15 @@ commands is offered them exactly once, that one you deleted is not resurrected,
 that a command you wrote yourself is never shadowed by a built-in of the same
 name, and that a single unreadable command no longer takes the whole list with
 it.
+
+**`Tests/minecraft`** pins the game-or-launcher decision, which is the half of
+that feature that can be settled without a Mac in a particular state: which
+commands it applies to at all, that naming the launcher out loud still asks for
+the launcher, that Mojang's own launcher being *called* Minecraft doesn't switch
+the whole thing off, and that the seeded command resolves exactly as it always
+did. Whether the game is running is the machine's business, so the last check is
+only the mistake that would matter — handing back the launcher as if it were the
+game, which would make "open minecraft" a no-op that looks like a hang.
 
 **`Tests/answers`** covers everything the Mac works out for itself: sums,
 percentages, unit conversions, timer durations, volume and transport words, where

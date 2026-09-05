@@ -914,6 +914,17 @@ final class ListenerEngine {
             return fresh
         }()
 
+        // Whether "open minecraft" means the game rather than the launcher it
+        // is pointed at. Decided here beside `fresh`, and for the same reason:
+        // the action, the HUD line and the spoken reply all have to agree that
+        // this is a switch and not a launch. See Minecraft.swift.
+        let game: NSRunningApplication? = {
+            guard macro.kind == .app, Minecraft.isLauncher(path: macro.target),
+                  !Minecraft.namedLauncher(in: heard, path: macro.target)
+            else { return nil }
+            return Minecraft.running()
+        }()
+
         // "bring over xcode" is a different action from "open xcode", and the
         // HUD and the spoken line should both say so.
         let quitting = resolution.quitTarget && macro.kind.canBeQuit
@@ -922,6 +933,8 @@ final class ListenerEngine {
             label = "Quitting \(macro.name)"
         } else if resolution.bringHere && macro.kind.canBeBrought {
             label = "Bringing \(macro.name) over"
+        } else if game != nil {
+            label = "Switching to \(macro.name)"
         } else if let fresh {
             label = fresh == .tab ? "New tab" : "New window"
         } else if macro.kind == .search, let query = resolution.payload {
@@ -940,7 +953,7 @@ final class ListenerEngine {
         perform(macro, payload: resolution.payload, heard: heard,
                 forceNewTab: resolution.forceNewTab,
                 bringHere: resolution.bringHere, quitTarget: quitting,
-                browserFresh: fresh, id: id) { [weak self] extra in
+                browserFresh: fresh, game: game, id: id) { [weak self] extra in
             guard let self, id == self.runID else { return }
             guard !macro.kind.handlesOwnReply else { return }
             self.speakReply(action: label, heard: heard, extra: extra, id: id)
@@ -963,21 +976,22 @@ final class ListenerEngine {
     private func perform(_ macro: Macro, payload: String?, heard: String = "",
                          forceNewTab: Bool = false,
                          bringHere: Bool = false, quitTarget: Bool = false,
-                         browserFresh: Browser.Fresh? = nil, id: Int = 0,
+                         browserFresh: Browser.Fresh? = nil,
+                         game: NSRunningApplication? = nil, id: Int = 0,
                          completion: @escaping (String?) -> Void) {
         switch macro.kind {
         case .app:
             // "quit chrome" — the opposite of everything else here. Asked
             // politely, so an app with unsaved work still gets to object.
             if quitTarget {
-                quitApp(macro, completion: completion)
+                quitApp(macro, running: game, completion: completion)
                 return
             }
 
             // "bring over xcode": move its windows to this desktop *before*
             // activating, or activating would send us to the desktop it was on
             // and the move would be a visible yank back.
-            if bringHere, let running = Spaces.runningApp(atPath: macro.target) {
+            if bringHere, let running = game ?? Spaces.runningApp(atPath: macro.target) {
                 if Spaces.bring(pid: running.processIdentifier) {
                     log("brought \(macro.name) to this desktop")
                 } else {
@@ -986,6 +1000,16 @@ final class ListenerEngine {
                     log("couldn't move \(macro.name) between desktops; focusing it instead")
                 }
                 running.activate(options: [.activateAllWindows])
+                completion(nil)
+                return
+            }
+
+            // The game is already up, so this is a switch and not a launch:
+            // focus it and leave the launcher alone. Opening the launcher again
+            // would drop its window in front of the world you're standing in.
+            if let game {
+                game.activate(options: [.activateAllWindows])
+                log("switched to the running \(macro.name)")
                 completion(nil)
                 return
             }
@@ -1389,8 +1413,14 @@ final class ListenerEngine {
     }
 
     /// "quit chrome". Polite, and never itself.
-    private func quitApp(_ macro: Macro, completion: @escaping (String?) -> Void) {
-        guard let running = Spaces.runningApp(atPath: macro.target) else {
+    ///
+    /// `override` is for the one target that isn't where the command points:
+    /// with Minecraft running, "quit minecraft" means the game, not the
+    /// launcher that started it — quitting the launcher and leaving the world
+    /// open would be the wrong half of the pair.
+    private func quitApp(_ macro: Macro, running override: NSRunningApplication? = nil,
+                         completion: @escaping (String?) -> Void) {
+        guard let running = override ?? Spaces.runningApp(atPath: macro.target) else {
             log("\(macro.name) isn't running")
             if Prefs.showHUD { HUDOverlay.shared.fail("\(macro.name) isn't running") }
             completion(nil)
