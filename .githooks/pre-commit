@@ -1,0 +1,58 @@
+#!/bin/bash
+# Refuses a commit that would put private strings into the repository.
+#
+# The strings themselves are not in here — this file is public. They live in
+# .git-private-patterns, which .gitignore keeps out of every commit, so the
+# guard travels with the project while the things it guards never do.
+#
+# One pattern per line, extended-regex, "#" comments and blank lines ignored.
+# Nothing to check against means nothing to enforce: a fresh clone gets a
+# warning rather than a failure, since the patterns are personal to a machine.
+
+set -u
+
+root=$(git rev-parse --show-toplevel)
+patterns="$root/.git-private-patterns"
+
+if [ ! -f "$patterns" ]; then
+    echo "pre-commit: no .git-private-patterns file; skipping the private-string check." >&2
+    exit 0
+fi
+
+# Only the staged text is examined. A pattern matching something already in
+# history is history's problem, not this commit's.
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+found=0
+while IFS= read -r pattern; do
+    case "$pattern" in ''|'#'*) continue ;; esac
+
+    hits=$(git diff --cached --diff-filter=ACM -U0 -- $staged \
+           | grep -E '^\+' | grep -vE '^\+\+\+' | grep -inE "$pattern")
+    [ -z "$hits" ] && continue
+
+    if [ "$found" -eq 0 ]; then
+        echo >&2
+        echo "pre-commit: this commit contains private strings." >&2
+        found=1
+    fi
+    echo >&2
+    echo "  pattern: $pattern" >&2
+    echo "$hits" | sed 's/^/    /' >&2
+
+    # Name the files too, so the fix has somewhere to start.
+    for f in $staged; do
+        if git show ":$f" 2>/dev/null | grep -qiE "$pattern"; then
+            echo "    in: $f" >&2
+        fi
+    done
+done < "$patterns"
+
+if [ "$found" -eq 1 ]; then
+    echo >&2
+    echo "Replace them with placeholders, or commit with --no-verify if this is deliberate." >&2
+    exit 1
+fi
+
+exit 0

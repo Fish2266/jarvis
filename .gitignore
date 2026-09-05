@@ -20,3 +20,6 @@ Package.resolved
 ._*
 .Spotlight-V100
 .Trashes
+
+# The pre-commit guard's private string list — personal to this machine.
+.git-private-patterns

@@ -52,7 +52,7 @@ clap clap  "lock the screen"
 
 ### Chrome profiles
 
-Website commands can pin themselves to a Chrome profile, so school and personal stay separate:
+Website commands can pin themselves to a Chrome profile, so school and personal stay separate — for example:
 
 | Profile | Commands |
 |---|---|
